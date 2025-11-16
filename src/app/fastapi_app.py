@@ -693,6 +693,48 @@ def admin_policy_simulate(request: Request, tenant: str, body: dict):
         },
     }
 
+def _track_query_volume(tenant: str, doc_type: str | None):
+    if not _redis_usable():
+        return
+    try:
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        key = f"q:vol:{day}"
+        dt = doc_type or "__none__"
+        field = f"{tenant}|{dt}"
+        _redis.hincrby(key, field, 1)
+    except Exception:
+        _record_redis_failure()
+
+@app.get("/admin/query/hotspots", tags=["Admin"])
+def admin_query_hotspots(request: Request, day: str | None = None, limit: int = 50):
+    require_admin(request)
+    if not _redis_usable():
+        raise HTTPException(status_code=503, detail="Redis not available for query hotspots")
+    try:
+        d = day or time.strftime("%Y-%m-%d", time.gmtime())
+        key = f"q:vol:{d}"
+        h = _redis.hgetall(key) or {}
+        rows = []
+        for k, v in h.items():
+            try:
+                tenant, dt = k.split("|", 1)
+            except ValueError:
+                tenant, dt = k, "__none__"
+            try:
+                c = int(v)
+            except Exception:
+                c = 0
+            rows.append({"tenant": tenant, "doc_type": None if dt == "__none__" else dt, "count": c})
+        rows.sort(key=lambda x: x["count"], reverse=True)
+        if limit and limit > 0:
+            rows = rows[: int(limit)]
+        return {"ok": True, "day": d, "hotspots": rows}
+    except HTTPException:
+        raise
+    except Exception:
+        _record_redis_failure()
+        raise HTTPException(status_code=500, detail="redis error")
+
 # ---- Phase 18: Router admin endpoints ----
 def _router_policy(tenant: str) -> dict:
     pol = {"objective": Config.ROUTER_DEFAULT_OBJECTIVE, "allowed_providers": Config.ROUTER_ALLOWED_PROVIDERS}
@@ -2220,6 +2262,12 @@ def ask(req: AskReq, request: Request):
                 req.filters.doc_type = str(add_filters.get("doc_type"))
     except HTTPException:
         raise
+    except Exception:
+        pass
+    # Phase 27: record query volume per tenant/doc_type for hotspot analytics
+    try:
+        dt_for_q = getattr(req.filters, "doc_type", None) if req.filters else None
+        _track_query_volume(tenant_label, dt_for_q)
     except Exception:
         pass
     try:
