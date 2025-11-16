@@ -1666,6 +1666,21 @@ def _expand_query(q: str) -> str:
     except Exception:
         return q
 
+def _classify_intent(q: str) -> str:
+    try:
+        low = (q or "").lower()
+        # Troubleshooting / incident style
+        if any(t in low for t in ["error", "exception", "stack trace", "failed", "failure", "bug", "issue"]):
+            return "troubleshoot"
+        # Long, open-ended description
+        tokens = low.split()
+        if len(tokens) > 20 or any(t in low for t in ["overview", "explain", "guide", "walkthrough"]):
+            return "explore"
+        # Short fact lookup
+        return "lookup"
+    except Exception:
+        return "lookup"
+
 def _redact_pii(text: str) -> str:
     if not (Config.PII_REDACTION_ENABLED and text):
         return text
@@ -1864,6 +1879,19 @@ def ask(req: AskReq, request: Request):
         raise HTTPException(status_code=429, detail="Too many concurrent requests for tenant")
     k_bounds = (limits.get("k_min", 4), limits.get("k_max", 20))
     fk_bounds = (limits.get("fetch_min", 10), limits.get("fetch_max", 50))
+    # Phase 20: intent-aware dynamic retrieval depth
+    intent = _classify_intent(q)
+    k_min, k_max = k_bounds
+    fk_min, fk_max = fk_bounds
+    if intent == "lookup":
+        k_eff = k_min
+        fk_eff = max(fk_min, (fk_min + fk_max) // 2)
+    elif intent == "troubleshoot":
+        k_eff = min(k_max, k_min + 4)
+        fk_eff = fk_max
+    else:  # explore
+        k_eff = k_max
+        fk_eff = fk_max
     try:
         ASK_USAGE_TOTAL.labels(tenant_label).inc()
     except Exception:
@@ -1961,6 +1989,9 @@ def ask(req: AskReq, request: Request):
                 "rerank": bool(rerank_enabled),
                 "q": q,
                 "filters": filters_key,
+                "intent": intent,
+                "k": int(k_eff),
+                "fetch_k": int(fk_eff),
             }
             coarse_cache_key = "ask:coarse:" + hashlib.sha1(json.dumps(coarse_key_raw, sort_keys=True).encode("utf-8")).hexdigest()
             v = _redis.get(coarse_cache_key)
@@ -1981,11 +2012,18 @@ def ask(req: AskReq, request: Request):
     except Exception:
         pass
     # Build or reuse chain for this routing
-    key_rt = (model_name, bool(rerank_enabled))
+    key_rt = (model_name, bool(rerank_enabled), int(k_eff), int(fk_eff))
     chain = _qa_cache.get(key_rt)
     if chain is None:
         try:
-            chain = build_chain(filters=req.filters, llm_model=model_name, rerank_enabled=rerank_enabled, llm_provider=routed_provider)
+            chain = build_chain(
+                filters=req.filters,
+                llm_model=model_name,
+                rerank_enabled=rerank_enabled,
+                k_override=int(k_eff),
+                fetch_k_override=int(fk_eff),
+                llm_provider=routed_provider,
+            )
             _qa_cache[key_rt] = chain
         except Exception:
             chain = None
@@ -2003,7 +2041,7 @@ def ask(req: AskReq, request: Request):
             filt = req.filters.dict() if req.filters else {}
         except Exception:
             filt = {}
-        ckey = f"ask:{ns}:{tenant_label}:{q}:{json.dumps(filt, sort_keys=True)}"
+        ckey = f"ask:{ns}:{tenant_label}:{q}:{json.dumps(filt, sort_keys=True)}:{int(k_eff)}:{int(fk_eff)}"
         nkey = f"{ckey}:neg"
         if _redis_usable():
             try:
