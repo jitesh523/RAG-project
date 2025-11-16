@@ -705,6 +705,22 @@ def _track_query_volume(tenant: str, doc_type: str | None):
     except Exception:
         _record_redis_failure()
 
+def _append_query_trail(tenant: str, q: str, intent: str | None, doc_type: str | None):
+    if not _redis_usable():
+        return
+    try:
+        key = f"q:trail:{tenant}"
+        evt = {
+            "ts": int(time.time()),
+            "q": q,
+            "intent": intent,
+            "doc_type": doc_type,
+        }
+        _redis.lpush(key, json.dumps(evt))
+        _redis.ltrim(key, 0, 199)
+    except Exception:
+        _record_redis_failure()
+
 @app.get("/admin/query/hotspots", tags=["Admin"])
 def admin_query_hotspots(request: Request, day: str | None = None, limit: int = 50):
     require_admin(request)
@@ -729,6 +745,27 @@ def admin_query_hotspots(request: Request, day: str | None = None, limit: int = 
         if limit and limit > 0:
             rows = rows[: int(limit)]
         return {"ok": True, "day": d, "hotspots": rows}
+    except HTTPException:
+        raise
+    except Exception:
+        _record_redis_failure()
+        raise HTTPException(status_code=500, detail="redis error")
+
+@app.get("/admin/query/trail", tags=["Admin"])
+def admin_query_trail(request: Request, tenant: str, limit: int = 50):
+    require_admin(request)
+    if not _redis_usable():
+        raise HTTPException(status_code=503, detail="Redis not available for query trail")
+    try:
+        key = f"q:trail:{tenant}"
+        raw = _redis.lrange(key, 0, max(0, int(limit) - 1)) or []
+        out = []
+        for r in raw:
+            try:
+                out.append(json.loads(r))
+            except Exception:
+                continue
+        return {"ok": True, "tenant": tenant, "events": out}
     except HTTPException:
         raise
     except Exception:
@@ -2262,6 +2299,12 @@ def ask(req: AskReq, request: Request):
                 req.filters.doc_type = str(add_filters.get("doc_type"))
     except HTTPException:
         raise
+    except Exception:
+        pass
+    # Phase 28: append query trail event (tenant-level) with intent and doc_type
+    try:
+        dt_for_trail = getattr(req.filters, "doc_type", None) if req.filters else None
+        _append_query_trail(tenant_label, q, intent, dt_for_trail)
     except Exception:
         pass
     # Phase 27: record query volume per tenant/doc_type for hotspot analytics
