@@ -682,13 +682,17 @@ def admin_router_set_costs(request: Request, body: dict):
             _record_redis_failure()
     return admin_router_get_costs(request, provider=provider, model=model)
 
-def _router_decide(tenant: str, fallback_model: str) -> tuple[str, str, str]:
+def _router_decide(tenant: str, fallback_model: str, doc_type: str | None) -> tuple[str, str, str]:
     """Return (model, provider, reason)."""
     if not Config.ROUTER_ENABLED:
         return fallback_model, "openai", "disabled"
     pol = _router_policy(tenant)
     objective = (pol.get("objective") or "balanced").lower()
     allowed = pol.get("allowed_providers") or ["openai"]
+    slo_max_p95_ms = pol.get("max_p95_ms")
+    slo_max_err = pol.get("max_error_rate_5m")
+    slo_max_cost = pol.get("max_prompt_cost_per_1k")
+    dt_over = (pol.get("doc_type_overrides") or {})
     # Helper readers for health and cost
     def _p95(p: str) -> float:
         if not _redis_usable():
@@ -702,6 +706,20 @@ def _router_decide(tenant: str, fallback_model: str) -> tuple[str, str, str]:
             return float(s[idx])
         except Exception:
             return 999.0
+    def _err_rate_5m(p: str) -> float:
+        if not _redis_usable():
+            return 0.0
+        try:
+            now = int(time.time())
+            err_ts = [int(x) for x in (_redis.lrange(f"prov:errts:{p}", 0, 499) or [])]
+            req_ts = [int(x) for x in (_redis.lrange(f"prov:reqts:{p}", 0, 999) or [])]
+            errs = sum(1 for t in err_ts if now - t <= 300)
+            reqs = sum(1 for t in req_ts if now - t <= 300)
+            if reqs <= 0:
+                return 0.0
+            return float(errs) / float(reqs)
+        except Exception:
+            return 0.0
     def _cost_prompt_per_1k(p: str, m: str) -> float:
         if not _redis_usable():
             return 999.0
@@ -712,43 +730,106 @@ def _router_decide(tenant: str, fallback_model: str) -> tuple[str, str, str]:
         except Exception:
             pass
         return 999.0
-    # Candidate scoring
+    # Candidate list with SLO evaluation
+    doc_type_key = (doc_type or "").lower() or None
+    order = list(allowed)
+    # doc_type override preferred provider
+    if doc_type_key and isinstance(dt_over, dict):
+        try:
+            ov = dt_over.get(doc_type_key) or {}
+            ovp = ov.get("provider")
+            if ovp and ovp in allowed:
+                order = [ovp] + [p for p in allowed if p != ovp]
+        except Exception:
+            pass
+    cands = []
+    for p in order:
+        p95 = _p95(p)
+        err = _err_rate_5m(p)
+        cost = _cost_prompt_per_1k(p, fallback_model)
+        ms = p95 * 1000.0
+        slo_ok = True
+        if slo_max_p95_ms is not None:
+            try:
+                slo_ok = slo_ok and (ms <= float(slo_max_p95_ms))
+            except Exception:
+                pass
+        if slo_max_err is not None:
+            try:
+                slo_ok = slo_ok and (err <= float(slo_max_err))
+            except Exception:
+                pass
+        if slo_max_cost is not None:
+            try:
+                slo_ok = slo_ok and (cost <= float(slo_max_cost))
+            except Exception:
+                pass
+        cands.append({"provider": p, "p95": p95, "err": err, "cost": cost, "slo_ok": slo_ok})
+    def _pick_best(key: str, prefer_ok: bool, reverse: bool = False) -> tuple[dict, bool]:
+        chosen = None
+        used_ok = False
+        pool = cands
+        if prefer_ok and any(c["slo_ok"] for c in cands):
+            pool = [c for c in cands if c["slo_ok"]]
+            used_ok = True
+        best_val = None
+        for c in pool:
+            v = c[key]
+            if best_val is None or ((v > best_val) if reverse else (v < best_val)):
+                best_val = v
+                chosen = c
+        return chosen or cands[0], used_ok
     model = fallback_model
-    provider = allowed[0] if allowed else "openai"
+    provider = order[0] if order else "openai"
     reason = objective
+    # choose based on objective with SLO-aware selection
     if objective == "latency":
-        best = 1e9
-        for p in allowed:
-            v = _p95(p)
-            if v < best:
-                best = v
-                provider = p
-        reason = "latency"
+        chosen, used_ok = _pick_best("p95", prefer_ok=True)
+        provider = chosen["provider"]
         model = Config.LLM_MODEL_CHEAP
+        reason = "latency" if used_ok else "latency_slo_violation"
     elif objective == "cost":
-        best = 1e9
-        for p in allowed:
-            v = _cost_prompt_per_1k(p, fallback_model)
-            if v < best:
-                best = v
-                provider = p
-        reason = "cost"
+        chosen, used_ok = _pick_best("cost", prefer_ok=True)
+        provider = chosen["provider"]
         model = Config.LLM_MODEL_CHEAP
+        reason = "cost" if used_ok else "cost_slo_violation"
     elif objective == "quality":
-        provider = allowed[0] if allowed else "openai"
+        # prefer doc_type override / first allowed but fail over if SLOs badly violated and another provider is OK
+        chosen, used_ok = _pick_best("err", prefer_ok=True)
+        provider = chosen["provider"]
         model = Config.LLM_MODEL_A
-        reason = "quality"
+        reason = "quality" if used_ok else "quality_slo_failover"
     else:
-        # balanced: min of normalized latency + cost
-        best = 1e9
-        for p in allowed:
-            v = (_p95(p)/2.0) + (_cost_prompt_per_1k(p, fallback_model)/2.0)
-            if v < best:
-                best = v
-                provider = p
-        reason = "balanced"
+        # balanced: latency + cost combined; prefer SLO-ok
+        for c in cands:
+            c["score"] = c["p95"] + c["cost"]
+        def _pick_bal() -> tuple[dict, bool]:
+            pool = [c for c in cands if c["slo_ok"]]
+            used_ok_local = True
+            if not pool:
+                pool = cands
+                used_ok_local = False
+            best = None
+            best_val = None
+            for c in pool:
+                v = c["score"]
+                if best_val is None or v < best_val:
+                    best_val = v
+                    best = c
+            return best or cands[0], used_ok_local
+        chosen, used_ok = _pick_bal()
+        provider = chosen["provider"]
+        model = fallback_model
+        reason = "balanced" if used_ok else "balanced_slo_violation"
     try:
-        _redis.lpush("router:hist", json.dumps({"ts": int(time.time()), "tenant": tenant, "provider": provider, "model": model, "reason": reason}))
+        _redis.lpush("router:hist", json.dumps({
+            "ts": int(time.time()),
+            "tenant": tenant,
+            "provider": provider,
+            "model": model,
+            "reason": reason,
+            "doc_type": doc_type_key,
+        }))
         _redis.ltrim("router:hist", 0, 999)
     except Exception:
         _record_redis_failure()
@@ -1851,10 +1932,15 @@ def ask(req: AskReq, request: Request):
     model_name = Config.LLM_MODEL_A if llm_variant == "A" else Config.LLM_MODEL_B
     if model_override:
         model_name = model_override
-    # Phase 18: route provider/model decision
+    # Phase 18+19: route provider/model decision with SLOs and doc_type overrides
     routed_provider = "openai"
+    doc_type = None
     try:
-        model_name, routed_provider, _rreason = _router_decide(tenant_label, model_name)
+        doc_type = getattr(req.filters, "doc_type", None) if req.filters else None
+    except Exception:
+        doc_type = None
+    try:
+        model_name, routed_provider, _rreason = _router_decide(tenant_label, model_name, doc_type)
     except Exception:
         pass
     rerank_enabled = _get_rerank_enabled(tenant_label)
