@@ -787,6 +787,50 @@ def admin_index_canary_reembed(request: Request, body: dict):
     res = reembed_active_to_canary(embeddings, provider=provider, model=model, limit=limit, batch_size=batch_size)
     return {"ok": True, "reembedded": res}
 
+def _index_route_key(tenant: str, doc_type: str | None) -> str:
+    t = (tenant or "__default__").lower()
+    dt = (doc_type or "").lower()
+    return f"{t}:{dt}" if dt else t
+
+def _index_collection_for(tenant: str, doc_type: str | None) -> str | None:
+    if not _redis_usable():
+        return None
+    try:
+        key_exact = _index_route_key(tenant, doc_type)
+        v = _redis.hget("index:route", key_exact)
+        if v:
+            return str(v)
+        # fallback: tenant-only route
+        v2 = _redis.hget("index:route", (tenant or "__default__").lower())
+        if v2:
+            return str(v2)
+    except Exception:
+        _record_redis_failure()
+    return None
+
+@app.get("/admin/index/routes", tags=["Admin"])
+def admin_index_routes_get(request: Request):
+    require_admin(request)
+    routes = {}
+    if _redis_usable():
+        try:
+            routes = _redis.hgetall("index:route") or {}
+        except Exception:
+            _record_redis_failure()
+    return {"ok": True, "routes": routes}
+
+@app.post("/admin/index/routes", tags=["Admin"])
+def admin_index_routes_set(request: Request, routes: dict):
+    require_admin(request)
+    if _redis_usable() and routes:
+        try:
+            mapping = {str(k): str(v) for k, v in routes.items()}
+            _redis.hset("index:route", mapping=mapping)
+        except Exception:
+            _record_redis_failure()
+            raise HTTPException(status_code=500, detail="redis error")
+    return admin_index_routes_get(request)
+
 @app.get("/admin/router/costs", tags=["Admin"])
 def admin_router_get_costs(request: Request, provider: str, model: str):
     require_admin(request)
@@ -2234,6 +2278,12 @@ def ask(req: AskReq, request: Request):
     except Exception:
         pass
     rerank_enabled = _get_rerank_enabled(tenant_label)
+    # Phase 26: multi-index routing – choose collection per tenant/doc_type
+    routed_collection = None
+    try:
+        routed_collection = _index_collection_for(tenant_label, doc_type)
+    except Exception:
+        routed_collection = None
     # Phase 14: coarse prompt cache read (pre-LLM)
     coarse_cache_key = None
     if _redis_usable() and Config.SEMANTIC_CACHE_ENABLED:
@@ -2273,8 +2323,8 @@ def ask(req: AskReq, request: Request):
             run_shadow_eval(tenant_label, q, req.filters, treatment_model=model_name, treatment_rerank=rerank_enabled)
     except Exception:
         pass
-    # Build or reuse chain for this routing
-    key_rt = (model_name, bool(rerank_enabled), int(k_eff), int(fk_eff))
+    # Build or reuse chain for this routing (include collection name in cache key)
+    key_rt = (model_name, bool(rerank_enabled), int(k_eff), int(fk_eff), routed_collection or "__default__")
     chain = _qa_cache.get(key_rt)
     if chain is None:
         try:
@@ -2284,6 +2334,7 @@ def ask(req: AskReq, request: Request):
                 rerank_enabled=rerank_enabled,
                 k_override=int(k_eff),
                 fetch_k_override=int(fk_eff),
+                milvus_collection_override=routed_collection,
                 llm_provider=routed_provider,
             )
             _qa_cache[key_rt] = chain
