@@ -1681,6 +1681,56 @@ def _classify_intent(q: str) -> str:
     except Exception:
         return "lookup"
 
+def _maybe_eval_math(q: str):
+    """Best-effort arithmetic evaluator for simple calculator-style queries.
+    Returns a float or None if not a pure math expression.
+    """
+    try:
+        import re
+        expr = (q or "").strip()
+        if not expr:
+            return None
+        if not re.fullmatch(r"[0-9\s\+\-\*\/\(\)\.]+", expr):
+            return None
+        # Safe eval: no builtins, only math operators
+        val = eval(expr, {"__builtins__": None}, {})  # type: ignore
+        if isinstance(val, (int, float)):
+            return float(val)
+        return None
+    except Exception:
+        return None
+
+def _episode_key(tenant: str, user: str) -> str:
+    return f"ep:{tenant}:{user}"
+
+def _append_episode(tenant: str, user: str, q: str, answer: str) -> None:
+    if not _redis_usable():
+        return
+    try:
+        rec = json.dumps({"q": q, "a": answer, "ts": int(time.time())})
+        k = _episode_key(tenant, user)
+        _redis.lpush(k, rec)
+        _redis.ltrim(k, 0, 9)
+        _redis.expire(k, 3600)
+    except Exception:
+        _record_redis_failure()
+
+def _load_episode(tenant: str, user: str) -> list[dict]:
+    out: list[dict] = []
+    if not _redis_usable():
+        return out
+    try:
+        k = _episode_key(tenant, user)
+        rows = _redis.lrange(k, 0, 4) or []
+        for r in rows:
+            try:
+                out.append(json.loads(r))
+            except Exception:
+                continue
+    except Exception:
+        _record_redis_failure()
+    return out
+
 def _redact_pii(text: str) -> str:
     if not (Config.PII_REDACTION_ENABLED and text):
         return text
@@ -1856,12 +1906,27 @@ def ask(req: AskReq, request: Request):
         raise HTTPException(status_code=400, detail="Query must not be empty")
     if len(q) > 4000:
         raise HTTPException(status_code=400, detail="Query too long (max 4000 chars)")
-    # Optional query expansion to improve recall
-    q_expanded = _expand_query(q)
+    # Phase 21: simple arithmetic tool path
+    math_val = _maybe_eval_math(q)
+    if math_val is not None:
+        return {"answer": str(math_val), "sources": []}
+    # Optional query expansion to improve recall (after episode context is read)
     if not READY or qa_chain is None:
         raise HTTPException(status_code=503, detail="Service not ready. Ingest documents to create ./faiss_store and restart.")
     # Determine AB routing for this tenant
     tenant_label = _tenant_from_key(api_key_hdr)
+    # Phase 21: short episode context (per-tenant+user)
+    user_id = key
+    ep = _load_episode(tenant_label, user_id)
+    if ep:
+        try:
+            history_txt = "\n".join([f"Q: {e.get('q','')}\nA: {e.get('a','')}" for e in ep])
+            q_for_llm = f"Previous context (most recent first):\n{history_txt}\n\nNew question: {q}"
+        except Exception:
+            q_for_llm = q
+    else:
+        q_for_llm = q
+    q_expanded = _expand_query(q_for_llm)
     # Phase 15: tier enforcement — rate limit and concurrency
     tier = _tenant_tier(tenant_label)
     limits = _tier_limits(tier)
@@ -1933,6 +1998,25 @@ def ask(req: AskReq, request: Request):
                 req.filters.doc_type = str(add_filters.get("doc_type"))
     except HTTPException:
         raise
+    except Exception:
+        pass
+    try:
+        deny = set()
+        srcs = []
+        for d in result.get("source_documents", []):
+            src = getattr(d, "metadata", {}).get("source")
+            if src:
+                srcs.append(src)
+        post = policy_eval_post({"tenant": tenant_label, "sources": srcs}, pol)
+        if post.get("deny"):
+            raise HTTPException(status_code=403, detail="Policy denied the answer")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    # record episode context
+    try:
+        _append_episode(tenant_label, user_id, q, result.get("result") or result.get("answer") or "")
     except Exception:
         pass
     def _get_llm_variant(t: str) -> str:
