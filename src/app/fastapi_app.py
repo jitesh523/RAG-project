@@ -612,6 +612,19 @@ def admin_eval_drift_status(request: Request, tenant: str | None = None, window:
         "status": status,
     }
 
+@app.get("/admin/playbook", tags=["Admin"])
+def admin_playbook_get(request: Request, tenant: str):
+    require_admin(request)
+    cfg = _load_playbook(tenant)
+    return {"ok": True, "tenant": tenant, "playbook": cfg}
+
+@app.post("/admin/playbook", tags=["Admin"])
+def admin_playbook_set(request: Request, tenant: str, body: dict):
+    require_admin(request)
+    cfg = body or {}
+    _save_playbook(tenant, cfg)
+    return admin_playbook_get(request, tenant)
+
 # ---- Phase 18: Router admin endpoints ----
 def _router_policy(tenant: str) -> dict:
     pol = {"objective": Config.ROUTER_DEFAULT_OBJECTIVE, "allowed_providers": Config.ROUTER_ALLOWED_PROVIDERS}
@@ -1790,6 +1803,32 @@ def _load_episode(tenant: str, user: str) -> list[dict]:
         _record_redis_failure()
     return out
 
+def _playbook_key(tenant: str) -> str:
+    return f"playbook:{tenant}"
+
+def _load_playbook(tenant: str) -> dict:
+    cfg: dict = {}
+    if not _redis_usable():
+        return cfg
+    try:
+        raw = _redis.get(_playbook_key(tenant))
+        if raw:
+            try:
+                cfg = json.loads(raw)
+            except Exception:
+                cfg = {}
+    except Exception:
+        _record_redis_failure()
+    return cfg
+
+def _save_playbook(tenant: str, cfg: dict) -> None:
+    if not _redis_usable():
+        return
+    try:
+        _redis.set(_playbook_key(tenant), json.dumps(cfg or {}))
+    except Exception:
+        _record_redis_failure()
+
 def _redact_pii(text: str) -> str:
     if not (Config.PII_REDACTION_ENABLED and text):
         return text
@@ -1980,11 +2019,23 @@ def ask(req: AskReq, request: Request):
     if ep:
         try:
             history_txt = "\n".join([f"Q: {e.get('q','')}\nA: {e.get('a','')}" for e in ep])
-            q_for_llm = f"Previous context (most recent first):\n{history_txt}\n\nNew question: {q}"
+            base_q = f"Previous context (most recent first):\n{history_txt}\n\nNew question: {q}"
         except Exception:
-            q_for_llm = q
+            base_q = q
     else:
-        q_for_llm = q
+        base_q = q
+    # Phase 23: tenant playbook personalization
+    pb = _load_playbook(tenant_label)
+    style = ""
+    try:
+        if isinstance(pb, dict):
+            style = str(pb.get("style") or pb.get("instructions") or "").strip()
+    except Exception:
+        style = ""
+    if style:
+        q_for_llm = f"Follow these tenant-specific instructions when answering:\n{style}\n\nQuestion: {base_q}"
+    else:
+        q_for_llm = base_q
     q_expanded = _expand_query(q_for_llm)
     # Phase 15: tier enforcement — rate limit and concurrency
     tier = _tenant_tier(tenant_label)
