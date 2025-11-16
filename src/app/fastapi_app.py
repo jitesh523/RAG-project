@@ -654,6 +654,45 @@ def admin_temporal_status(request: Request, tenant: str | None = None):
         tenant_range = _read_range(f"temporal:{tenant}")
     return {"ok": True, "tenant": tenant, "global": global_range, "tenant_range": tenant_range}
 
+@app.post("/admin/policy/simulate", tags=["Admin"])
+def admin_policy_simulate(request: Request, tenant: str, body: dict):
+    """Simulate policy pre/post effects for a tenant on a hypothetical Q&A."""
+    require_admin(request)
+    pol = load_policy(_redis if _redis_usable() else None, tenant)
+    q = (body or {}).get("query") or ""
+    doc_type = (body or {}).get("doc_type")
+    region = (body or {}).get("region")
+    qctx = {"tenant": tenant, "doc_type": doc_type, "region": region}
+    pre_filters, pre_decision = policy_eval_pre(qctx, pol)
+    post_answer = None
+    post_sources = None
+    post_decision = None
+    ans = (body or {}).get("answer")
+    sources = (body or {}).get("sources") or []
+    override = bool((body or {}).get("override"))
+    if ans is not None:
+        # normalize sources into list of dicts
+        norm_sources = []
+        try:
+            for s in sources:
+                if isinstance(s, dict):
+                    norm_sources.append(dict(s))
+                else:
+                    norm_sources.append({"source": str(s)})
+        except Exception:
+            norm_sources = []
+        post_answer, post_sources, post_decision = policy_eval_post(ans, norm_sources, pol, override=override)
+    return {
+        "ok": True,
+        "tenant": tenant,
+        "pre": {"filters": pre_filters, "decision": pre_decision},
+        "post": {
+            "answer": post_answer,
+            "sources": post_sources,
+            "decision": post_decision,
+        },
+    }
+
 # ---- Phase 18: Router admin endpoints ----
 def _router_policy(tenant: str) -> dict:
     pol = {"objective": Config.ROUTER_DEFAULT_OBJECTIVE, "allowed_providers": Config.ROUTER_ALLOWED_PROVIDERS}
