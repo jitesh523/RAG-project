@@ -553,6 +553,65 @@ def admin_router_providers(request: Request):
     })
     return {"ok": True, "providers": providers, "allowed": Config.ROUTER_ALLOWED_PROVIDERS}
 
+@app.get("/admin/eval/drift/status", tags=["Admin"])
+def admin_eval_drift_status(request: Request, tenant: str | None = None, window: int = 3600):
+    require_admin(request)
+    if not _redis_usable():
+        raise HTTPException(status_code=503, detail="Redis not available for eval status")
+    now_ts = int(time.time())
+    total = 0
+    ctrl_wins = 0
+    treat_wins = 0
+    ties = 0
+    avg_delta = 0.0
+    try:
+        rows = _redis.lrange("online:judge", 0, 9999) or []
+    except Exception:
+        _record_redis_failure()
+        rows = []
+    deltas = []
+    for r in rows:
+        try:
+            obj = json.loads(r)
+        except Exception:
+            continue
+        ts = int(obj.get("ts", 0))
+        if window and ts and now_ts - ts > int(window):
+            continue
+        t = str(obj.get("tenant", ""))
+        if tenant and t != tenant:
+            continue
+        total += 1
+        c_sc = float(obj.get("control_score", 0.0))
+        t_sc = float(obj.get("treatment_score", 0.0))
+        deltas.append(t_sc - c_sc)
+        w = str(obj.get("winner", "tie"))
+        if w == "control":
+            ctrl_wins += 1
+        elif w == "treatment":
+            treat_wins += 1
+        else:
+            ties += 1
+    if deltas:
+        avg_delta = float(sum(deltas) / len(deltas))
+    status = "stable"
+    if total >= 10:
+        if avg_delta < -0.05:
+            status = "regressed"
+        elif avg_delta > 0.05:
+            status = "improved"
+    return {
+        "ok": True,
+        "tenant": tenant,
+        "window_seconds": int(window),
+        "total": total,
+        "control_wins": ctrl_wins,
+        "treatment_wins": treat_wins,
+        "ties": ties,
+        "avg_treatment_minus_control": avg_delta,
+        "status": status,
+    }
+
 # ---- Phase 18: Router admin endpoints ----
 def _router_policy(tenant: str) -> dict:
     pol = {"objective": Config.ROUTER_DEFAULT_OBJECTIVE, "allowed_providers": Config.ROUTER_ALLOWED_PROVIDERS}

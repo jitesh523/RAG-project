@@ -6,6 +6,7 @@ from typing import Optional, Dict, Any
 from prometheus_client import Counter, Histogram
 from src.config import Config
 from src.app.deps import build_chain
+from langchain_openai import ChatOpenAI
 
 ONLINE_EVAL_EVENTS = Counter(
     "online_eval_events_total",
@@ -16,6 +17,12 @@ ONLINE_EVAL_LATENCY = Histogram(
     "online_eval_latency_seconds",
     "Latency of shadow path",
     labelnames=["bucket"],
+)
+
+ONLINE_JUDGE_EVENTS = Counter(
+    "online_judge_events_total",
+    "LLM-as-judge comparisons recorded",
+    labelnames=["tenant", "winner"],
 )
 
 # Redis is optional; imported lazily to avoid import cycles in app startup
@@ -35,6 +42,21 @@ def _get_redis():
         _redis = None
     return None
 
+_judge_llm: Optional[ChatOpenAI] = None
+
+def _get_judge_llm() -> Optional[ChatOpenAI]:
+    global _judge_llm
+    if _judge_llm is not None:
+        return _judge_llm
+    try:
+        if not Config.OPENAI_API_KEY:
+            return None
+        _judge_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=Config.OPENAI_API_KEY)
+        return _judge_llm
+    except Exception:
+        _judge_llm = None
+        return None
+
 
 def _record_event(obj: Dict[str, Any]):
     try:
@@ -42,6 +64,70 @@ def _record_event(obj: Dict[str, Any]):
         if r is not None:
             r.lpush("online:eval", json.dumps(obj))
             r.ltrim("online:eval", 0, 9999)
+    except Exception:
+        pass
+
+
+def _record_judge(obj: Dict[str, Any]):
+    try:
+        r = _get_redis()
+        if r is not None:
+            r.lpush("online:judge", json.dumps(obj))
+            r.ltrim("online:judge", 0, 9999)
+    except Exception:
+        pass
+
+
+def _run_judge(tenant: str, q: str, control_res: Dict[str, Any], treatment_res: Dict[str, Any]):
+    llm = _get_judge_llm()
+    if llm is None:
+        return
+    try:
+        c_text = (control_res.get("result") or "") if isinstance(control_res, dict) else ""
+        t_text = (treatment_res.get("result") or "") if isinstance(treatment_res, dict) else ""
+        if not c_text and not t_text:
+            return
+        prompt = (
+            "You are a strict evaluator for Q&A. Given a question and two answers, "
+            "return STRICT JSON with keys 'control_score', 'treatment_score', 'winner'. "
+            "Scores are floats from 0 to 1 reflecting helpfulness and correctness. "
+            "Winner is 'control', 'treatment', or 'tie'.\n\n" 
+            f"Question: {q}\n\nControl answer: {c_text}\n\nTreatment answer: {t_text}\n\n"
+        )
+        msg = [{"role": "user", "content": prompt}]
+        out = llm.invoke(msg)
+        txt = getattr(out, "content", "") or ""
+        data = {}
+        try:
+            # best-effort JSON extraction
+            start = txt.find("{")
+            end = txt.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                data = json.loads(txt[start : end + 1])
+        except Exception:
+            data = {}
+        c_score = float(data.get("control_score", 0.0))
+        t_score = float(data.get("treatment_score", 0.0))
+        winner = str(data.get("winner", "tie")).lower()
+        if winner not in ("control", "treatment", "tie"):
+            if abs(t_score - c_score) < 0.05:
+                winner = "tie"
+            elif t_score > c_score:
+                winner = "treatment"
+            else:
+                winner = "control"
+        _record_judge({
+            "ts": int(time.time()),
+            "tenant": tenant,
+            "q": q,
+            "control_score": c_score,
+            "treatment_score": t_score,
+            "winner": winner,
+        })
+        try:
+            ONLINE_JUDGE_EVENTS.labels(tenant, winner).inc()
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -66,7 +152,7 @@ def _shadow_worker(tenant: str, q: str, filters, control_model: str, treatment_m
             ONLINE_EVAL_EVENTS.labels(tenant, "treatment").inc()
         except Exception as e:
             t_res = {"error": str(e)}
-        _record_event({
+        evt = {
             "ts": int(time.time()),
             "tenant": tenant,
             "query": q,
@@ -85,7 +171,10 @@ def _shadow_worker(tenant: str, q: str, filters, control_model: str, treatment_m
                 "sources": [getattr(d, "metadata", {}).get("source", "") for d in (t_res.get("source_documents") or [])] if isinstance(t_res, dict) else [],
                 "error": t_res.get("error") if isinstance(t_res, dict) else None,
             },
-        })
+        }
+        _record_event(evt)
+        # LLM-as-judge scoring
+        _run_judge(tenant, q, evt["control"], evt["treatment"])
     except Exception:
         pass
 
