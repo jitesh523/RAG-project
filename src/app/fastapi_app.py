@@ -625,6 +625,35 @@ def admin_playbook_set(request: Request, tenant: str, body: dict):
     _save_playbook(tenant, cfg)
     return admin_playbook_get(request, tenant)
 
+@app.get("/admin/temporal/status", tags=["Admin"])
+def admin_temporal_status(request: Request, tenant: str | None = None):
+    require_admin(request)
+    if not _redis_usable():
+        raise HTTPException(status_code=503, detail="Redis not available for temporal status")
+    def _read_range(prefix: str) -> dict:
+        try:
+            start = _redis.get(f"{prefix}:start")
+            end = _redis.get(f"{prefix}:end")
+        except Exception:
+            _record_redis_failure()
+            start = None
+            end = None
+        def _fmt(ts: str | None):
+            try:
+                if not ts:
+                    return None
+                iv = int(ts)
+                from datetime import datetime
+                return datetime.utcfromtimestamp(iv).isoformat() + "Z"
+            except Exception:
+                return None
+        return {"start_ts": start, "end_ts": end, "start_iso": _fmt(start), "end_iso": _fmt(end)}
+    global_range = _read_range("temporal:global")
+    tenant_range = None
+    if tenant:
+        tenant_range = _read_range(f"temporal:{tenant}")
+    return {"ok": True, "tenant": tenant, "global": global_range, "tenant_range": tenant_range}
+
 # ---- Phase 18: Router admin endpoints ----
 def _router_policy(tenant: str) -> dict:
     pol = {"objective": Config.ROUTER_DEFAULT_OBJECTIVE, "allowed_providers": Config.ROUTER_ALLOWED_PROVIDERS}
