@@ -256,6 +256,88 @@ def admin_policy_test(request: Request, tenant: str, body: dict):
     ans, srcs, post_dec = policy_eval_post(body.get("answer", ""), body.get("sources", []) or [], pol, override=bool(body.get("override", False)))
     return {"ok": True, "pre": {"filters": filt, "decision": decision}, "post": {"answer": ans, "sources": srcs, "decision": post_dec}}
 
+# ---- Phase 29: Guardrails & Safety Nets ----
+def _guardrail_key(tenant: str) -> str:
+    t = tenant or "__default__"
+    return f"guard:{t}"
+
+def _load_guardrail_cfg(tenant: str) -> dict:
+    cfg: dict = {"block_patterns": [], "allow_untrusted": True}
+    if not _redis_usable():
+        return cfg
+    try:
+        raw = _redis.get(_guardrail_key(tenant))
+        if raw:
+            try:
+                user_cfg = json.loads(raw)
+                if isinstance(user_cfg, dict):
+                    cfg.update(user_cfg)
+            except Exception:
+                pass
+    except Exception:
+        _record_redis_failure()
+    return cfg
+
+def _guardrails_check_input(text: str, cfg: dict) -> dict:
+    """Simple pattern-based guardrail decision.
+
+    cfg example:
+      {
+        "block_patterns": ["delete database", "drop table", "ignore previous instructions"],
+        "allow_untrusted": true
+      }
+    Returns {"blocked": bool, "matched": str | None}.
+    """
+    t = (text or "").lower()
+    blocked = False
+    matched = None
+    try:
+        pats = cfg.get("block_patterns") or []
+        for p in pats:
+            try:
+                s = str(p).lower()
+            except Exception:
+                continue
+            if not s:
+                continue
+            if s in t:
+                blocked = True
+                matched = s
+                break
+    except Exception:
+        blocked = False
+        matched = None
+    return {"blocked": bool(blocked), "matched": matched}
+
+def _save_guardrail_cfg(tenant: str, cfg: dict) -> None:
+    if not _redis_usable():
+        return
+    try:
+        _redis.set(_guardrail_key(tenant), json.dumps(cfg or {}))
+    except Exception:
+        _record_redis_failure()
+
+@app.get("/admin/guardrails/config", tags=["Admin"])
+def admin_guardrails_get(request: Request, tenant: str):
+    require_admin(request)
+    cfg = _load_guardrail_cfg(tenant)
+    return {"ok": True, "tenant": tenant, "config": cfg}
+
+@app.post("/admin/guardrails/config", tags=["Admin"])
+def admin_guardrails_set(request: Request, tenant: str, body: dict):
+    require_admin(request)
+    cfg = body or {}
+    _save_guardrail_cfg(tenant, cfg)
+    return admin_guardrails_get(request, tenant)
+
+@app.post("/admin/guardrails/test", tags=["Admin"])
+def admin_guardrails_test(request: Request, tenant: str, body: dict):
+    require_admin(request)
+    cfg = _load_guardrail_cfg(tenant)
+    text = (body or {}).get("text") or ""
+    decision = _guardrails_check_input(text, cfg)
+    return {"ok": True, "tenant": tenant, "decision": decision}
+
 # ---- Phase 17: Data Lifecycle & SearchOps ----
 def _freshness_touch(source: str, ts: int | None = None):
     if not source:
@@ -2195,6 +2277,26 @@ def ask(req: AskReq, request: Request):
         raise HTTPException(status_code=400, detail="Query must not be empty")
     if len(q) > 4000:
         raise HTTPException(status_code=400, detail="Query too long (max 4000 chars)")
+    # Phase 29: tenant guardrails on input text
+    tenant_label = _tenant_from_key(api_key_hdr)
+    try:
+        gcfg = _load_guardrail_cfg(tenant_label)
+        decision = _guardrails_check_input(q, gcfg)
+        if decision.get("blocked"):
+            try:
+                logger.info(json.dumps({
+                    "event": "guardrail_block",
+                    "tenant": tenant_label,
+                    "request_id": getattr(getattr(request, "state", None), "request_id", ""),
+                    "matched": decision.get("matched"),
+                }))
+            except Exception:
+                pass
+            raise HTTPException(status_code=400, detail="Query blocked by tenant guardrails")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
     # Phase 21: simple arithmetic tool path
     math_val = _maybe_eval_math(q)
     if math_val is not None:
