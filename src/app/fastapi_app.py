@@ -3348,6 +3348,153 @@ def admin_feedback_summary(request: Request, tenant: str, limit: int = 500):
         "top_tags": top_tags,
     }
 
+@app.get(
+    "/admin/tuning/suggestions",
+    tags=["Admin"],
+    summary="Derive non-destructive tuning suggestions from recent signals",
+)
+def admin_tuning_suggestions(request: Request, tenant: str, day: str | None = None, limit: int = 500):
+    """Suggest router/retrieval/index tweaks based on feedback, hotspots, and trails.
+
+    This endpoint is read-only: it does not modify any config, only returns suggestions.
+    """
+    require_admin(request)
+    t = (tenant or "").strip()
+    if not t:
+        raise HTTPException(status_code=400, detail="tenant required")
+    # Feedback-based signals (reusing logic similar to admin_feedback_summary)
+    items = []
+    if _redis_usable():
+        try:
+            raw = _redis.lrange("feedback", -max(10, int(limit)), -1) or []
+            for r in raw[::-1]:
+                try:
+                    obj = json.loads(r)
+                    if obj.get("tenant") != t:
+                        continue
+                    items.append(obj)
+                except Exception:
+                    continue
+        except Exception:
+            _record_redis_failure()
+    else:
+        items = _feedback_mem.get(t, [])[-limit:]
+    total_fb = len(items)
+    helpful_rate = None
+    halluc_rate = None
+    if items:
+        pos = sum(1 for it in items if bool(it.get("helpful")))
+        halluc = sum(1 for it in items if it.get("hallucinated") is True)
+        helpful_rate = pos / float(total_fb)
+        halluc_rate = halluc / float(total_fb)
+    # Hotspots: per-tenant doc_type concentration
+    doc_type_counts: dict[str | None, int] = {}
+    if _redis_usable():
+        try:
+            d = day or time.strftime("%Y-%m-%d", time.gmtime())
+            key = f"q:vol:{d}"
+            h = _redis.hgetall(key) or {}
+            for k, v in h.items():
+                try:
+                    ten, dt = k.split("|", 1)
+                except ValueError:
+                    ten, dt = k, "__none__"
+                if ten != t:
+                    continue
+                try:
+                    c = int(v)
+                except Exception:
+                    c = 0
+                dt_norm: str | None = None if dt == "__none__" else dt
+                doc_type_counts[dt_norm] = doc_type_counts.get(dt_norm, 0) + c
+        except Exception:
+            _record_redis_failure()
+    # Trails: intent mix for this tenant
+    intent_counts: dict[str, int] = {}
+    if _redis_usable():
+        try:
+            key_trail = f"q:trail:{t}"
+            raw_trail = _redis.lrange(key_trail, 0, 199) or []
+            for r in raw_trail:
+                try:
+                    obj = json.loads(r)
+                except Exception:
+                    continue
+                inten = (obj.get("intent") or "").strip().lower()
+                if not inten:
+                    continue
+                intent_counts[inten] = intent_counts.get(inten, 0) + 1
+        except Exception:
+            _record_redis_failure()
+    # Build suggestions
+    suggestions = []
+    signals = {
+        "helpful_rate": helpful_rate,
+        "hallucinated_rate": halluc_rate,
+        "doc_type_counts": doc_type_counts,
+        "intent_counts": intent_counts,
+        "feedback_count": total_fb,
+    }
+    # Suggest router objective tweaks based on helpful/hallucination
+    if helpful_rate is not None:
+        if helpful_rate < 0.6:
+            suggestions.append({
+                "kind": "router_policy",
+                "action": "consider_quality_objective",
+                "reason": "low_helpful_rate",
+                "target_objective": "quality",
+                "metrics": {"helpful_rate": helpful_rate, "hallucinated_rate": halluc_rate},
+            })
+        elif helpful_rate > 0.85 and (halluc_rate is None or halluc_rate < 0.05):
+            suggestions.append({
+                "kind": "router_policy",
+                "action": "consider_cost_or_latency_objective",
+                "reason": "high_helpful_low_hallucinations",
+                "target_objective": "cost",
+                "metrics": {"helpful_rate": helpful_rate, "hallucinated_rate": halluc_rate},
+            })
+    # Suggest retrieval depth tuning based on intent mix
+    total_int = sum(intent_counts.values()) or 0
+    if total_int > 0:
+        frac_trouble = intent_counts.get("troubleshoot", 0) / float(total_int)
+        frac_lookup = intent_counts.get("lookup", 0) / float(total_int)
+        if frac_trouble > 0.3:
+            suggestions.append({
+                "kind": "retrieval_depth",
+                "action": "increase_k_fetch_k",
+                "reason": "high_troubleshoot_intent_share",
+                "metrics": {"troubleshoot_share": frac_trouble, "lookup_share": frac_lookup},
+            })
+        elif frac_lookup > 0.6:
+            suggestions.append({
+                "kind": "retrieval_depth",
+                "action": "consider_reducing_k_for_lookup",
+                "reason": "dominant_lookup_intent",
+                "metrics": {"troubleshoot_share": frac_trouble, "lookup_share": frac_lookup},
+            })
+    # Suggest index routing if one doc_type dominates volume
+    total_dt = sum(doc_type_counts.values()) or 0
+    if total_dt > 0:
+        # find dominant doc_type (excluding None)
+        best_dt = None
+        best_cnt = 0
+        for dt, c in doc_type_counts.items():
+            if dt is None:
+                continue
+            if c > best_cnt:
+                best_cnt = c
+                best_dt = dt
+        if best_dt is not None and best_cnt / float(total_dt) >= 0.5:
+            suggestions.append({
+                "kind": "index_routing",
+                "action": "consider_dedicated_collection_for_doc_type",
+                "reason": "dominant_doc_type_volume",
+                "doc_type": best_dt,
+                "metrics": {"doc_type_share": best_cnt / float(total_dt)},
+                "hint_index_route_key": _index_route_key(t, best_dt),
+            })
+    return {"ok": True, "tenant": t, "signals": signals, "suggestions": suggestions}
+
 # SSE streaming endpoint (flag-gated)
 @app.get("/ask/stream")
 def ask_stream(query: str, request: Request):
