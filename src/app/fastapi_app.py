@@ -3495,6 +3495,79 @@ def admin_tuning_suggestions(request: Request, tenant: str, day: str | None = No
             })
     return {"ok": True, "tenant": t, "signals": signals, "suggestions": suggestions}
 
+@app.post(
+    "/admin/tuning/apply",
+    tags=["Admin"],
+    summary="Apply conservative tuning changes based on recent signals",
+)
+def admin_tuning_apply(request: Request, tenant: str, day: str | None = None, limit: int = 500):
+    """Mutate router policy and index routing based on current signals.
+
+    This is an explicit, admin-triggered operation; no automatic background tuning.
+    """
+    require_admin(request)
+    t = (tenant or "").strip()
+    if not t:
+        raise HTTPException(status_code=400, detail="tenant required")
+    # Reuse suggestion logic
+    sugg_resp = admin_tuning_suggestions(request, tenant=t, day=day, limit=limit)
+    signals = sugg_resp.get("signals", {})
+    suggestions = sugg_resp.get("suggestions", [])
+    applied = []
+    skipped = []
+    # Mutate router policy objective if warranted
+    for s in suggestions:
+        try:
+            kind = s.get("kind")
+            if kind == "router_policy":
+                action = s.get("action")
+                target_obj = s.get("target_objective")
+                if not target_obj:
+                    skipped.append({"suggestion": s, "reason": "no_target_objective"})
+                    continue
+                # load current router policy and update objective field
+                pol = _router_policy(t)
+                old_obj = pol.get("objective")
+                if str(old_obj or "").lower() == str(target_obj).lower():
+                    skipped.append({"suggestion": s, "reason": "already_set"})
+                    continue
+                pol["objective"] = target_obj
+                if _redis_usable():
+                    try:
+                        _redis.set(f"router:policy:{t}", json.dumps(pol))
+                    except Exception:
+                        _record_redis_failure()
+                        skipped.append({"suggestion": s, "reason": "redis_error"})
+                        continue
+                applied.append({"kind": kind, "change": {"objective": target_obj}, "from": old_obj})
+            elif kind == "index_routing":
+                dt = s.get("doc_type")
+                hint_key = s.get("hint_index_route_key") or _index_route_key(t, dt)
+                if not dt or not hint_key:
+                    skipped.append({"suggestion": s, "reason": "missing_doc_type"})
+                    continue
+                if not _redis_usable():
+                    skipped.append({"suggestion": s, "reason": "redis_unusable"})
+                    continue
+                # only set mapping if not already present to avoid overriding manual config
+                try:
+                    existing = _redis.hget("index:route", hint_key)
+                    if existing:
+                        skipped.append({"suggestion": s, "reason": "route_already_set"})
+                        continue
+                    # suggest collection name convention: <tenant>_<doc_type>
+                    coll_name = f"{t}_{dt}".replace(":", "_")
+                    _redis.hset("index:route", mapping={hint_key: coll_name})
+                    applied.append({"kind": kind, "change": {"route_key": hint_key, "collection": coll_name}})
+                except Exception:
+                    _record_redis_failure()
+                    skipped.append({"suggestion": s, "reason": "redis_error"})
+            else:
+                skipped.append({"suggestion": s, "reason": "not_applicable"})
+        except Exception:
+            skipped.append({"suggestion": s, "reason": "exception"})
+    return {"ok": True, "tenant": t, "signals": signals, "applied": applied, "skipped": skipped}
+
 # SSE streaming endpoint (flag-gated)
 @app.get("/ask/stream")
 def ask_stream(query: str, request: Request):
