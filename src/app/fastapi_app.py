@@ -1875,7 +1875,11 @@ class FeedbackReq(BaseModel):
     query: str
     answer: str
     helpful: bool
+    reason: Optional[str] = None
     clicked_sources: Optional[list[str]] = None
+    hallucinated: Optional[bool] = None
+    style_score: Optional[int] = None
+    tags: Optional[list[str]] = None
 
 qa_chain = None
 READY = False
@@ -3106,14 +3110,26 @@ def submit_feedback(req: FeedbackReq, request: Request):
         FEEDBACK_TOTAL.labels(tenant=tenant, helpful=str(helpful).lower()).inc()
     except Exception:
         pass
+    fb = {
+        "tenant": tenant,
+        "helpful": bool(req.helpful),
+        "reason": req.reason or "",
+        "query": req.query,
+        "answer": req.answer,
+        "clicked_sources": req.clicked_sources or [],
+        "hallucinated": bool(req.hallucinated) if req.hallucinated is not None else None,
+        "style_score": req.style_score,
+        "tags": req.tags or [],
+        "ts": int(time.time()),
+    }
     if _redis_usable():
         try:
-            _redis.rpush("feedback", json.dumps({"tenant": tenant, "helpful": helpful, "reason": req.reason or ""}))
+            _redis.rpush("feedback", json.dumps(fb))
         except Exception:
             _record_redis_failure()
-            _feedback_mem.setdefault(tenant, []).append({"helpful": helpful, "reason": req.reason or ""})
+            _feedback_mem.setdefault(tenant, []).append(fb)
     else:
-        _feedback_mem.setdefault(tenant, []).append({"helpful": helpful, "reason": req.reason or ""})
+        _feedback_mem.setdefault(tenant, []).append(fb)
     return {"ok": True}
 
 @app.get(
@@ -3259,6 +3275,78 @@ def admin_feedback_export(request: Request, limit: int = 1000, tenant: str | Non
         return res
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get(
+    "/admin/feedback/summary",
+    tags=["Admin"],
+    summary="Summarize recent feedback for a tenant",
+)
+def admin_feedback_summary(request: Request, tenant: str, limit: int = 500):
+    require_admin(request)
+    t = (tenant or "").strip()
+    if not t:
+        raise HTTPException(status_code=400, detail="tenant required")
+    items = []
+    if _redis_usable():
+        try:
+            raw = _redis.lrange("feedback", -max(10, int(limit)), -1) or []
+            for r in raw[::-1]:
+                try:
+                    obj = json.loads(r)
+                    if obj.get("tenant") != t:
+                        continue
+                    items.append(obj)
+                except Exception:
+                    continue
+        except Exception:
+            _record_redis_failure()
+    else:
+        items = _feedback_mem.get(t, [])[-limit:]
+    if not items:
+        return {"ok": True, "tenant": t, "count": 0, "helpful_rate": None, "hallucinated_rate": None, "avg_style_score": None, "top_reasons": [], "top_tags": []}
+    total = len(items)
+    helpful_cnt = 0
+    halluc_cnt = 0
+    style_vals = []
+    reasons: dict[str, int] = {}
+    tags: dict[str, int] = {}
+    for it in items:
+        try:
+            if bool(it.get("helpful")):
+                helpful_cnt += 1
+            if it.get("hallucinated") is True:
+                halluc_cnt += 1
+            sc = it.get("style_score")
+            if isinstance(sc, (int, float)):
+                style_vals.append(float(sc))
+            r = (it.get("reason") or "").strip()
+            if r:
+                reasons[r] = reasons.get(r, 0) + 1
+            for tg in it.get("tags") or []:
+                try:
+                    s = str(tg).strip()
+                except Exception:
+                    s = ""
+                if not s:
+                    continue
+                tags[s] = tags.get(s, 0) + 1
+        except Exception:
+            continue
+    helpful_rate = helpful_cnt / float(total) if total else None
+    halluc_rate = halluc_cnt / float(total) if total else None
+    avg_style = (sum(style_vals) / float(len(style_vals))) if style_vals else None
+    top_reasons = sorted([{"reason": k, "count": v} for k, v in reasons.items()], key=lambda x: x["count"], reverse=True)[:10]
+    top_tags = sorted([{"tag": k, "count": v} for k, v in tags.items()], key=lambda x: x["count"], reverse=True)[:10]
+    return {
+        "ok": True,
+        "tenant": t,
+        "count": total,
+        "helpful_rate": helpful_rate,
+        "hallucinated_rate": halluc_rate,
+        "avg_style_score": avg_style,
+        "top_reasons": top_reasons,
+        "top_tags": top_tags,
+    }
 
 # SSE streaming endpoint (flag-gated)
 @app.get("/ask/stream")
