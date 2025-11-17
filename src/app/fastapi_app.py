@@ -72,7 +72,76 @@ def _incr_rate(tenant: str, limit_per_min: int) -> bool:
         return v <= max(1, int(limit_per_min))
     except Exception:
         _record_redis_failure()
-        return True
+
+def _output_guardrail_key(tenant: str) -> str:
+    t = tenant or "__default__"
+    return f"guard_out:{t}"
+
+def _load_output_guardrail_cfg(tenant: str) -> dict:
+    """Load per-tenant output guardrail config.
+
+    Fields (all optional, with defaults):
+      enable_pii_redaction: bool
+      enable_secret_redaction: bool
+      max_answer_chars: int | None
+    """
+    cfg: dict = {
+        "enable_pii_redaction": True,
+        "enable_secret_redaction": False,
+        "max_answer_chars": None,
+    }
+    if not _redis_usable():
+        return cfg
+    try:
+        raw = _redis.get(_output_guardrail_key(tenant))
+        if raw:
+            try:
+                user_cfg = json.loads(raw)
+                if isinstance(user_cfg, dict):
+                    cfg.update(user_cfg)
+            except Exception:
+                pass
+    except Exception:
+        _record_redis_failure()
+    return cfg
+
+def _save_output_guardrail_cfg(tenant: str, cfg: dict) -> None:
+    if not _redis_usable():
+        return
+    try:
+        _redis.set(_output_guardrail_key(tenant), json.dumps(cfg or {}))
+    except Exception:
+        _record_redis_failure()
+
+def _apply_output_guardrails(text: str, cfg: dict) -> tuple[str, list[str]]:
+    """Apply output guardrails and return (text, flags).
+
+    Flags are simple strings like ["pii_redacted", "secret_redacted", "truncated"] for observability.
+    """
+    flags: list[str] = []
+    out = text or ""
+    try:
+        import re
+        if cfg.get("enable_pii_redaction"):
+            before = out
+            # coarse email / phone / id patterns; reuse semantics of _redact_pii
+            out = _redact_pii(out)
+            if out != before:
+                flags.append("pii_redacted")
+        if cfg.get("enable_secret_redaction"):
+            before = out
+            # very rough secret-like patterns (tokens/keys)
+            out = re.sub(r"(?i)(api[_-]?key|secret|token)\s*[:=]\s*['\"]?[A-Za-z0-9_\-]{8,}['\"]?", r"\\1: [REDACTED_SECRET]", out)
+            out = re.sub(r"(?i)(password)\s*[:=]\s*['\"]?[^\s'\"]{4,}['\"]?", r"\\1: [REDACTED_SECRET]", out)
+            if out != before:
+                flags.append("secret_redacted")
+        max_chars = cfg.get("max_answer_chars")
+        if isinstance(max_chars, int) and max_chars > 0 and len(out) > max_chars:
+            out = out[:max_chars]
+            flags.append("truncated")
+    except Exception:
+        return text or "", []
+    return out, flags
 
 def _acquire_concurrency(tenant: str, max_conc: int) -> bool:
     TENANT_INFLIGHT.labels(tenant=tenant).inc()
@@ -337,6 +406,27 @@ def admin_guardrails_test(request: Request, tenant: str, body: dict):
     text = (body or {}).get("text") or ""
     decision = _guardrails_check_input(text, cfg)
     return {"ok": True, "tenant": tenant, "decision": decision}
+
+@app.get("/admin/guardrails/output_config", tags=["Admin"])
+def admin_guardrails_output_get(request: Request, tenant: str):
+    require_admin(request)
+    cfg = _load_output_guardrail_cfg(tenant)
+    return {"ok": True, "tenant": tenant, "config": cfg}
+
+@app.post("/admin/guardrails/output_config", tags=["Admin"])
+def admin_guardrails_output_set(request: Request, tenant: str, body: dict):
+    require_admin(request)
+    cfg = body or {}
+    _save_output_guardrail_cfg(tenant, cfg)
+    return admin_guardrails_output_get(request, tenant)
+
+@app.post("/admin/guardrails/output_test", tags=["Admin"])
+def admin_guardrails_output_test(request: Request, tenant: str, body: dict):
+    require_admin(request)
+    cfg = _load_output_guardrail_cfg(tenant)
+    text = (body or {}).get("text") or ""
+    out, flags = _apply_output_guardrails(text, cfg)
+    return {"ok": True, "tenant": tenant, "original": text, "output": out, "flags": flags, "config": cfg}
 
 # ---- Phase 17: Data Lifecycle & SearchOps ----
 def _freshness_touch(source: str, ts: int | None = None):
@@ -2869,7 +2959,15 @@ def ask(req: AskReq, request: Request):
         post_answer, post_sources, _pdec = policy_eval_post(safe_answer, sources, pol, override=override)
     except Exception:
         post_answer, post_sources = safe_answer, sources
-    resp = {"answer": post_answer, "sources": post_sources}
+    # Phase 33: tenant output guardrails (on top of policy post-processing)
+    try:
+        out_cfg = _load_output_guardrail_cfg(tenant_label)
+        guarded_answer, gflags = _apply_output_guardrails(post_answer, out_cfg)
+    except Exception:
+        guarded_answer, gflags = post_answer, []
+    resp = {"answer": guarded_answer, "sources": post_sources}
+    if gflags:
+        resp["guardrail_flags"] = gflags
     # Phase 15: budget enforcement (record and possibly signal downshift)
     try:
         approx_tokens = _estimate_tokens([q, post_answer])
