@@ -463,25 +463,3 @@ Response:
 }
 ```
 
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feature-name`
-3. Make changes and add tests
-4. Run the test suite: `make test`
-5. Submit a pull request
-
-## 📄 License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## 🆘 Support
-
-For issues and questions:
-1. Check the [troubleshooting guide](docs/troubleshooting.md)
-2. Search existing GitHub issues
-3. Create a new issue with detailed information
-
----
-
-**Built for production aerospace RAG workloads** 🚀
