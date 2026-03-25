@@ -25,6 +25,7 @@ EMBED_BATCH_DURATION = Histogram(
     "Duration of embedding batches",
 )
 
+
 def load_pdfs(input_dir: str):
     docs = []
     for root, _, files in os.walk(input_dir):
@@ -34,9 +35,13 @@ def load_pdfs(input_dir: str):
                 docs.extend(loader.load())
     return docs
 
+
 def chunk_docs(docs):
-    splitter = RecursiveCharacterTextSplitter(chunk_size=Config.CHUNK_SIZE, chunk_overlap=Config.CHUNK_OVERLAP)
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=Config.CHUNK_SIZE, chunk_overlap=Config.CHUNK_OVERLAP
+    )
     return splitter.split_documents(docs)
+
 
 # Prometheus counter for ingestion throughput (documents processed)
 INGEST_DOCS_TOTAL = Counter("ingest_documents_total", "Total documents/chunks ingested")
@@ -47,13 +52,14 @@ INGEST_RETRIES = Counter(
     labelnames=["stage"],
 )
 
+
 def to_milvus_rows(chunks, embeddings):
     rows = []
     texts = [c.page_content for c in chunks]
     embs = []
     bs = max(1, Config.EMBED_BATCH_SIZE)
     for i in range(0, len(texts), bs):
-        t_batch = texts[i:i+bs]
+        t_batch = texts[i : i + bs]
         attempt = 0
         delay = max(0.001, Config.RETRY_BASE_DELAY_MS / 1000.0)
         start = time.time()
@@ -79,6 +85,7 @@ def to_milvus_rows(chunks, embeddings):
         rows.append((rid, emb, doc.page_content[:65000], src, page))
     return rows
 
+
 def _parse_model_map(map_str: str):
     mp = {}
     try:
@@ -89,11 +96,13 @@ def _parse_model_map(map_str: str):
         pass
     return mp
 
+
 def _select_embed_model(doc_type: str) -> str:
     mp = _parse_model_map(Config.EMBED_MODEL_MAP)
     key = (doc_type or "").lower() or "default"
     which = mp.get(key) or mp.get("default") or "large"
     return Config.EMBED_MODEL_SMALL if which == "small" else Config.EMBED_MODEL_LARGE
+
 
 def main(input_dir: str, batch_size: int):
     docs = load_pdfs(input_dir)
@@ -107,13 +116,17 @@ def main(input_dir: str, batch_size: int):
     embed_model = _select_embed_model("pdf")
     embeddings = OpenAIEmbeddings(model=embed_model, api_key=Config.OPENAI_API_KEY)
     for i in range(0, len(chunks), batch_size):
-        batch = chunks[i:i+batch_size]
+        batch = chunks[i : i + batch_size]
         rows = to_milvus_rows(batch, embeddings)
         ins_attempt = 0
         ins_delay = max(0.001, Config.RETRY_BASE_DELAY_MS / 1000.0)
         while True:
             try:
-                part = Config.INGEST_TENANT if Config.MILVUS_PARTITIONED and Config.INGEST_TENANT else None
+                part = (
+                    Config.INGEST_TENANT
+                    if Config.MILVUS_PARTITIONED and Config.INGEST_TENANT
+                    else None
+                )
                 insert_rows(rows, partition=part)
                 break
             except Exception:
@@ -127,10 +140,13 @@ def main(input_dir: str, batch_size: int):
         INGEST_DOCS_TOTAL.inc(len(batch))
         if Config.PUSHGATEWAY_URL:
             try:
-                pushadd_to_gateway(Config.PUSHGATEWAY_URL, job="ingest", registry=REGISTRY)
+                pushadd_to_gateway(
+                    Config.PUSHGATEWAY_URL, job="ingest", registry=REGISTRY
+                )
             except Exception:
                 pass
-        print(f"[ingest] inserted {i+len(batch)}/{len(chunks)}")
+        print(f"[ingest] inserted {i + len(batch)}/{len(chunks)}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

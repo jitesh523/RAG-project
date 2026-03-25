@@ -1,4 +1,6 @@
-import os, json, time
+import os
+import json
+import time
 from typing import List, Dict, Any
 from src.config import Config
 
@@ -17,7 +19,9 @@ def _redis_client():
         return None
 
 
-def collect_feedback(limit: int = 1000, tenant: str | None = None) -> List[Dict[str, Any]]:
+def collect_feedback(
+    limit: int = 1000, tenant: str | None = None
+) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     r = _redis_client()
     if r is not None:
@@ -41,13 +45,15 @@ def collect_feedback(limit: int = 1000, tenant: str | None = None) -> List[Dict[
 def to_training_rows(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     rows = []
     for it in items:
-        rows.append({
-            "tenant": it.get("tenant"),
-            "helpful": bool(it.get("helpful")),
-            "reason": it.get("reason"),
-            "ts": it.get("ts", int(time.time())),
-            # reserved fields for future joining (query/answer ids)
-        })
+        rows.append(
+            {
+                "tenant": it.get("tenant"),
+                "helpful": bool(it.get("helpful")),
+                "reason": it.get("reason"),
+                "ts": it.get("ts", int(time.time())),
+                # reserved fields for future joining (query/answer ids)
+            }
+        )
     return rows
 
 
@@ -77,7 +83,12 @@ def maybe_upload_s3(path: str) -> str | None:
         return None
 
 
-def export_feedback(limit: int = 1000, tenant: str | None = None, out_dir: str = "./exports", upload: bool = False) -> Dict[str, Any]:
+def export_feedback(
+    limit: int = 1000,
+    tenant: str | None = None,
+    out_dir: str = "./exports",
+    upload: bool = False,
+) -> Dict[str, Any]:
     items = collect_feedback(limit=limit, tenant=tenant)
     rows = to_training_rows(items)
     ts = int(time.time())

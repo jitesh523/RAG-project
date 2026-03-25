@@ -8,10 +8,18 @@ from src.index.milvus_index import insert_rows
 from langchain_openai import OpenAIEmbeddings
 from prometheus_client import Counter, Histogram, REGISTRY, pushadd_to_gateway
 
-INGEST_WORKER_PROCESSED = Counter("ingest_worker_processed_total", "Total messages processed")
-INGEST_WORKER_RETRIES = Counter("ingest_worker_retries_total", "Total processing retries")
-INGEST_WORKER_FAILED = Counter("ingest_worker_failed_total", "Total failed messages sent to DLQ")
-INGEST_WORKER_HANDLE = Histogram("ingest_worker_handle_seconds", "Per-message handling time")
+INGEST_WORKER_PROCESSED = Counter(
+    "ingest_worker_processed_total", "Total messages processed"
+)
+INGEST_WORKER_RETRIES = Counter(
+    "ingest_worker_retries_total", "Total processing retries"
+)
+INGEST_WORKER_FAILED = Counter(
+    "ingest_worker_failed_total", "Total failed messages sent to DLQ"
+)
+INGEST_WORKER_HANDLE = Histogram(
+    "ingest_worker_handle_seconds", "Per-message handling time"
+)
 
 
 def _redis() -> redis.Redis:
@@ -35,7 +43,14 @@ def _parse_fields(fields: Dict[str, str]):
     date = fields.get("date", "")
     # derive id if not present
     mid = fields.get("id") or hashlib.sha1((text or "").encode("utf-8")).hexdigest()
-    return {"id": mid, "text": text, "source": source, "page": page, "doc_type": doc_type, "date": date}
+    return {
+        "id": mid,
+        "text": text,
+        "source": source,
+        "page": page,
+        "doc_type": doc_type,
+        "date": date,
+    }
 
 
 def _parse_model_map(map_str: str):
@@ -48,11 +63,13 @@ def _parse_model_map(map_str: str):
         pass
     return mp
 
+
 def _select_embed_model(doc_type: str) -> str:
     mp = _parse_model_map(Config.EMBED_MODEL_MAP)
     key = (doc_type or "").lower() or "default"
     which = mp.get(key) or mp.get("default") or "large"
     return Config.EMBED_MODEL_SMALL if which == "small" else Config.EMBED_MODEL_LARGE
+
 
 def run_worker():
     r = _redis()
@@ -65,7 +82,13 @@ def run_worker():
     dlq = Config.INGEST_DLQ_STREAM
     while True:
         try:
-            msgs = r.xreadgroup(group, consumer, streams={stream: ">"}, count=Config.INGEST_CONCURRENCY, block=5000)
+            msgs = r.xreadgroup(
+                group,
+                consumer,
+                streams={stream: ">"},
+                count=Config.INGEST_CONCURRENCY,
+                block=5000,
+            )
             if not msgs:
                 continue
             for sname, entries in msgs:
@@ -80,16 +103,38 @@ def run_worker():
                         # embed with per-doc_type model
                         model_name = _select_embed_model(data.get("doc_type", ""))
                         if model_name not in embed_clients:
-                            embed_clients[model_name] = OpenAIEmbeddings(model=model_name, api_key=Config.OPENAI_API_KEY)
+                            embed_clients[model_name] = OpenAIEmbeddings(
+                                model=model_name, api_key=Config.OPENAI_API_KEY
+                            )
                         emb = embed_clients[model_name].embed_query(data["text"])
-                        part = Config.INGEST_TENANT if Config.MILVUS_PARTITIONED and Config.INGEST_TENANT else None
-                        insert_rows([(data["id"][:32], emb, data["text"][:65000], data["source"], data["page"])], partition=part)
+                        part = (
+                            Config.INGEST_TENANT
+                            if Config.MILVUS_PARTITIONED and Config.INGEST_TENANT
+                            else None
+                        )
+                        insert_rows(
+                            [
+                                (
+                                    data["id"][:32],
+                                    emb,
+                                    data["text"][:65000],
+                                    data["source"],
+                                    data["page"],
+                                )
+                            ],
+                            partition=part,
+                        )
                         # update filter metadata per tenant (Redis-first)
                         try:
                             tenant = Config.INGEST_TENANT or "__default__"
-                            r.sadd(f"filt:{tenant}:sources", str(data.get("source", "")))
+                            r.sadd(
+                                f"filt:{tenant}:sources", str(data.get("source", ""))
+                            )
                             if data.get("doc_type"):
-                                r.sadd(f"filt:{tenant}:doc_types", str(data.get("doc_type")))
+                                r.sadd(
+                                    f"filt:{tenant}:doc_types",
+                                    str(data.get("doc_type")),
+                                )
                             if data.get("date"):
                                 d = str(data.get("date"))[:10]
                                 kmin = f"filt:{tenant}:date_min"
@@ -129,7 +174,11 @@ def run_worker():
                         INGEST_WORKER_HANDLE.observe(time.time() - start)
                         if Config.PUSHGATEWAY_URL:
                             try:
-                                pushadd_to_gateway(Config.PUSHGATEWAY_URL, job="ingest-worker", registry=REGISTRY)
+                                pushadd_to_gateway(
+                                    Config.PUSHGATEWAY_URL,
+                                    job="ingest-worker",
+                                    registry=REGISTRY,
+                                )
                             except Exception:
                                 pass
         except Exception:

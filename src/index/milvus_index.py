@@ -1,10 +1,16 @@
 from pymilvus import (
-    connections, FieldSchema, CollectionSchema, DataType, Collection, utility
+    connections,
+    FieldSchema,
+    CollectionSchema,
+    DataType,
+    Collection,
+    utility,
 )
 from typing import List, Tuple, Optional
 from src.config import Config
 from prometheus_client import Counter
 import time
+
 try:
     import redis as _r
 except Exception:
@@ -17,17 +23,26 @@ DR_DUAL_WRITE_ERRORS_TOTAL = Counter(
     "Total errors when writing to secondary cluster",
 )
 
+
 def connect():
-    connections.connect(alias="default", host=Config.MILVUS_HOST, port=str(Config.MILVUS_PORT))
+    connections.connect(
+        alias="default", host=Config.MILVUS_HOST, port=str(Config.MILVUS_PORT)
+    )
+
 
 def connect_secondary():
     if not Config.MILVUS_HOST_SECONDARY:
         return False
     try:
-        connections.connect(alias="secondary", host=Config.MILVUS_HOST_SECONDARY, port=str(Config.MILVUS_PORT_SECONDARY))
+        connections.connect(
+            alias="secondary",
+            host=Config.MILVUS_HOST_SECONDARY,
+            port=str(Config.MILVUS_PORT_SECONDARY),
+        )
         return True
     except Exception:
         return False
+
 
 def ensure_collection(name: str = Config.MILVUS_COLLECTION) -> Collection:
     connect()
@@ -35,7 +50,13 @@ def ensure_collection(name: str = Config.MILVUS_COLLECTION) -> Collection:
         return Collection(name)
 
     fields = [
-        FieldSchema(name="id", dtype=DataType.VARCHAR, is_primary=True, auto_id=False, max_length=64),
+        FieldSchema(
+            name="id",
+            dtype=DataType.VARCHAR,
+            is_primary=True,
+            auto_id=False,
+            max_length=64,
+        ),
         FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=EMBED_DIM),
         FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=65535),
         FieldSchema(name="source", dtype=DataType.VARCHAR, max_length=1024),
@@ -43,17 +64,29 @@ def ensure_collection(name: str = Config.MILVUS_COLLECTION) -> Collection:
     ]
     schema = CollectionSchema(fields, description="Aerospace chunks")
     col = Collection(name, schema)
-    col.create_index("embedding", {"index_type": "IVF_FLAT", "metric_type": "IP", "params": {"nlist": 1024}})
+    col.create_index(
+        "embedding",
+        {"index_type": "IVF_FLAT", "metric_type": "IP", "params": {"nlist": 1024}},
+    )
     col.load()
     return col
 
-def ensure_collection_secondary(name: str = Config.MILVUS_COLLECTION_SECONDARY) -> Collection | None:
+
+def ensure_collection_secondary(
+    name: str = Config.MILVUS_COLLECTION_SECONDARY,
+) -> Collection | None:
     if not connect_secondary():
         return None
     if utility.has_collection(name, using="secondary"):
         return Collection(name, using="secondary")
     fields = [
-        FieldSchema(name="id", dtype=DataType.VARCHAR, is_primary=True, auto_id=False, max_length=64),
+        FieldSchema(
+            name="id",
+            dtype=DataType.VARCHAR,
+            is_primary=True,
+            auto_id=False,
+            max_length=64,
+        ),
         FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=EMBED_DIM),
         FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=65535),
         FieldSchema(name="source", dtype=DataType.VARCHAR, max_length=1024),
@@ -61,9 +94,13 @@ def ensure_collection_secondary(name: str = Config.MILVUS_COLLECTION_SECONDARY) 
     ]
     schema = CollectionSchema(fields, description="Aerospace chunks (secondary)")
     col = Collection(name, schema, using="secondary")
-    col.create_index("embedding", {"index_type": "IVF_FLAT", "metric_type": "IP", "params": {"nlist": 1024}})
+    col.create_index(
+        "embedding",
+        {"index_type": "IVF_FLAT", "metric_type": "IP", "params": {"nlist": 1024}},
+    )
     col.load()
     return col
+
 
 def _ensure_partition(col: Collection, partition: str):
     try:
@@ -72,13 +109,21 @@ def _ensure_partition(col: Collection, partition: str):
     except Exception:
         pass
 
-def insert_rows(rows: List[Tuple[str, list, str, str, int]], name: str = Config.MILVUS_COLLECTION, partition: str | None = None):
+
+def insert_rows(
+    rows: List[Tuple[str, list, str, str, int]],
+    name: str = Config.MILVUS_COLLECTION,
+    partition: str | None = None,
+):
     # primary write
     col = ensure_collection(name)
     if partition:
         _ensure_partition(col, partition)
     ids, embeds, texts, sources, pages = zip(*rows)
-    col.insert([list(ids), list(embeds), list(texts), list(sources), list(pages)], partition_name=partition)
+    col.insert(
+        [list(ids), list(embeds), list(texts), list(sources), list(pages)],
+        partition_name=partition,
+    )
     col.flush()
     # record primary write timestamp
     try:
@@ -94,7 +139,10 @@ def insert_rows(rows: List[Tuple[str, list, str, str, int]], name: str = Config.
             if scol is not None:
                 if partition:
                     _ensure_partition(scol, partition)
-                scol.insert([list(ids), list(embeds), list(texts), list(sources), list(pages)], partition_name=partition)
+                scol.insert(
+                    [list(ids), list(embeds), list(texts), list(sources), list(pages)],
+                    partition_name=partition,
+                )
                 scol.flush()
                 try:
                     if _r is not None and Config.REDIS_URL:
@@ -107,6 +155,7 @@ def insert_rows(rows: List[Tuple[str, list, str, str, int]], name: str = Config.
                 DR_DUAL_WRITE_ERRORS_TOTAL.inc()
             except Exception:
                 pass
+
 
 def check_milvus_readiness(name: str = Config.MILVUS_COLLECTION) -> dict:
     """Return readiness info for Milvus connection and collection.
@@ -127,8 +176,11 @@ def check_milvus_readiness(name: str = Config.MILVUS_COLLECTION) -> dict:
         pass
     return info
 
+
 # ---- Re-embedding backfill to canary ----
-def reembed_active_to_canary(embeddings, provider: str, model: str, limit: int = 10000, batch_size: int = 256) -> dict:
+def reembed_active_to_canary(
+    embeddings, provider: str, model: str, limit: int = 10000, batch_size: int = 256
+) -> dict:
     """Reads up to 'limit' rows from active collection, re-embeds text, and writes to canary collection.
     Stores provider/model metadata in Redis for the canary index.
     """
@@ -142,22 +194,27 @@ def reembed_active_to_canary(embeddings, provider: str, model: str, limit: int =
         col.load()
     except Exception:
         pass
-    rows = []
     try:
         # Best-effort: pull up to 'limit' docs
-        docs = col.query(expr="", output_fields=["id","text","source","page"], limit=limit)
+        docs = col.query(
+            expr="", output_fields=["id", "text", "source", "page"], limit=limit
+        )
     except Exception:
         docs = []
     # Embed and write in batches
     total = 0
     buf_ids, buf_embs, buf_texts, buf_sources, buf_pages = [], [], [], [], []
+
     def _flush():
         nonlocal total, buf_ids, buf_embs, buf_texts, buf_sources, buf_pages
         if not buf_ids:
             return
-        insert_rows(list(zip(buf_ids, buf_embs, buf_texts, buf_sources, buf_pages)), name=canary)
+        insert_rows(
+            list(zip(buf_ids, buf_embs, buf_texts, buf_sources, buf_pages)), name=canary
+        )
         total += len(buf_ids)
         buf_ids, buf_embs, buf_texts, buf_sources, buf_pages = [], [], [], [], []
+
     for d in docs:
         try:
             tid = str(d.get("id"))
@@ -179,19 +236,30 @@ def reembed_active_to_canary(embeddings, provider: str, model: str, limit: int =
     r = _rc()
     if r is not None:
         try:
-            r.hset("index:canary:embed_meta", mapping={"provider": provider, "model": model, "rows": str(total)})
+            r.hset(
+                "index:canary:embed_meta",
+                mapping={"provider": provider, "model": model, "rows": str(total)},
+            )
         except Exception:
             pass
-    return {"active": active, "canary": canary, "rows": total, "provider": provider, "model": model}
+    return {
+        "active": active,
+        "canary": canary,
+        "rows": total,
+        "provider": provider,
+        "model": model,
+    }
+
 
 # ---- Phase 17: Canary index helpers ----
-def _rc() -> Optional['_r.Redis']:
+def _rc() -> Optional["_r.Redis"]:
     if _r is None or not Config.REDIS_URL:
         return None
     try:
         return _r.Redis.from_url(Config.REDIS_URL, decode_responses=True)
     except Exception:
         return None
+
 
 def get_active_collection_name() -> str:
     r = _rc()
@@ -203,6 +271,7 @@ def get_active_collection_name() -> str:
     except Exception:
         return Config.MILVUS_COLLECTION
 
+
 def get_canary_collection_name() -> str:
     r = _rc()
     base = get_active_collection_name()
@@ -213,6 +282,7 @@ def get_canary_collection_name() -> str:
         return v or f"{base}_canary"
     except Exception:
         return f"{base}_canary"
+
 
 def begin_canary_build() -> dict:
     """Create canary collection (if missing) and mark build start time.
@@ -230,6 +300,7 @@ def begin_canary_build() -> dict:
             pass
     return {"active": get_active_collection_name(), "canary": canary, "started": now}
 
+
 def promote_canary() -> dict:
     """Promote canary collection by switching the active pointer.
     Does not delete old active collection.
@@ -246,6 +317,7 @@ def promote_canary() -> dict:
         except Exception:
             pass
     return {"active": canary, "previous_active": active, "promoted_at": now}
+
 
 def index_status() -> dict:
     r = _rc()
@@ -268,7 +340,10 @@ def index_status() -> dict:
     st["canary_ready"] = check_milvus_readiness(st["canary"]).get("loaded", False)
     return st
 
-def check_milvus_readiness_secondary(name: str = Config.MILVUS_COLLECTION_SECONDARY) -> dict:
+
+def check_milvus_readiness_secondary(
+    name: str = Config.MILVUS_COLLECTION_SECONDARY,
+) -> dict:
     info = {"connected": False, "has_collection": False, "loaded": False}
     if not Config.MILVUS_HOST_SECONDARY:
         return info

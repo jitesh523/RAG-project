@@ -10,7 +10,9 @@ def ask_http(base_url: str, api_key: str | None, q: str) -> Dict:
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["x-api-key"] = api_key
-    r = requests.post(f"{base_url.rstrip('/')}/ask", json={"query": q}, headers=headers, timeout=60)
+    r = requests.post(
+        f"{base_url.rstrip('/')}/ask", json={"query": q}, headers=headers, timeout=60
+    )
     r.raise_for_status()
     return r.json()
 
@@ -38,7 +40,9 @@ def load_golden(path: str) -> List[Dict]:
     return out
 
 
-def recall_at_k(expected_sources: List[str], got_sources: List[str], k: int = 3) -> float:
+def recall_at_k(
+    expected_sources: List[str], got_sources: List[str], k: int = 3
+) -> float:
     got_k = got_sources[:k]
     for src in expected_sources:
         if src in got_k:
@@ -83,12 +87,14 @@ def main():
         kh = keyword_hit_rate(kws, answer)
         rec_sum += r
         kw_sum += kh
-        results.append({
-            "query": q,
-            "recall@%d" % k: r,
-            "keyword_hit": kh,
-            "sources": sources,
-        })
+        results.append(
+            {
+                "query": q,
+                "recall@%d" % k: r,
+                "keyword_hit": kh,
+                "sources": sources,
+            }
+        )
 
     n = max(1, len(golden))
     summary = {

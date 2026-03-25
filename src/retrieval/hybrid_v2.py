@@ -1,4 +1,3 @@
-import math
 from typing import List, Tuple, Dict, Any
 
 from rank_bm25 import BM25Okapi
@@ -15,6 +14,7 @@ RETR_STAGE_HITS = Counter(
     labelnames=["stage"],
 )
 
+
 class BM25Adapter:
     def __init__(self, corpus_docs: List[str], meta: List[Dict[str, Any]]):
         # Simple in-memory tokenization
@@ -27,6 +27,7 @@ class BM25Adapter:
 
     def search(self, query: str, k: int = 20) -> List[Tuple[float, Dict[str, Any]]]:
         import time
+
         t0 = time.time()
         scores = self._bm25.get_scores(self._tokenize(query or ""))
         pairs = list(enumerate(scores))
@@ -46,12 +47,16 @@ def blend_candidates(
     k: int = 10,
 ) -> List[Tuple[float, Dict[str, Any]]]:
     import time
+
     t0 = time.time()
     weights = weights or {"dense": 0.6, "bm25": 0.4}
     by_key: Dict[str, Dict[str, Any]] = {}
     by_score: Dict[str, float] = {}
+
     # normalize scores
-    def _norm(arr: List[Tuple[float, Dict[str, Any]]]) -> List[Tuple[float, Dict[str, Any]]]:
+    def _norm(
+        arr: List[Tuple[float, Dict[str, Any]]],
+    ) -> List[Tuple[float, Dict[str, Any]]]:
         if not arr:
             return []
         xs = [s for s, _ in arr]
@@ -59,20 +64,22 @@ def blend_candidates(
         if hi == lo:
             return [(1.0, m) for (_, m) in arr]
         return [((s - lo) / (hi - lo), m) for (s, m) in arr]
+
     dense_n = _norm(dense)
     bm25_n = _norm(bm25)
     for s, m in dense_n:
-        key = f"{m.get('source','')}#{m.get('page','')}"
+        key = f"{m.get('source', '')}#{m.get('page', '')}"
         by_key.setdefault(key, m)
         by_score[key] = by_score.get(key, 0.0) + weights.get("dense", 0.6) * float(s)
     for s, m in bm25_n:
-        key = f"{m.get('source','')}#{m.get('page','')}"
+        key = f"{m.get('source', '')}#{m.get('page', '')}"
         by_key.setdefault(key, m)
         by_score[key] = by_score.get(key, 0.0) + weights.get("bm25", 0.4) * float(s)
-    items = [ (sc, by_key[k]) for k, sc in by_score.items() ]
+    items = [(sc, by_key[k]) for k, sc in by_score.items()]
     items.sort(key=lambda x: x[0], reverse=True)
     out = items[:k]
     from time import time as _now
+
     RETR_STAGE_LATENCY.labels("blend").observe(_now() - t0)
     RETR_STAGE_HITS.labels("blend").inc(len(out))
     return out

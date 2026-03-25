@@ -13,6 +13,7 @@ def test_rate_limit_exceeded_returns_429(monkeypatch):
     class FakeChain:
         def invoke(self, q):
             from types import SimpleNamespace
+
             doc = SimpleNamespace(metadata={"source": "t.pdf", "page": 1})
             return {"result": "ok", "source_documents": [doc]}
 

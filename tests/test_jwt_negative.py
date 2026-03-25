@@ -4,7 +4,12 @@ from tests.conftest import reload_app_with_env
 
 def test_metrics_forbidden_with_invalid_hs256_token(monkeypatch):
     # Force metrics to require auth
-    appmod = reload_app_with_env(METRICS_PUBLIC="false", JWT_ALG="HS256", JWT_SECRET="secret", API_KEY="SECRETKEY")
+    appmod = reload_app_with_env(
+        METRICS_PUBLIC="false",
+        JWT_ALG="HS256",
+        JWT_SECRET="secret",
+        API_KEY="SECRETKEY",
+    )
     client = TestClient(appmod.app)
 
     # Invalid bearer token and wrong api key
@@ -27,6 +32,7 @@ def test_ask_unauthorized_with_invalid_bearer_when_api_key_required(monkeypatch)
     class FakeChain:
         def invoke(self, q):
             from types import SimpleNamespace
+
             doc = SimpleNamespace(metadata={"source": "t.pdf", "page": 1})
             return {"result": "ok", "source_documents": [doc]}
 

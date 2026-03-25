@@ -28,12 +28,14 @@ ONLINE_JUDGE_EVENTS = Counter(
 # Redis is optional; imported lazily to avoid import cycles in app startup
 _redis = None
 
+
 def _get_redis():
     global _redis
     if _redis is not None:
         return _redis
     try:
         import redis as _r
+
         if Config.REDIS_URL:
             _redis = _r.Redis.from_url(Config.REDIS_URL, decode_responses=True)
             _redis.ping()
@@ -42,7 +44,9 @@ def _get_redis():
         _redis = None
     return None
 
+
 _judge_llm: Optional[ChatOpenAI] = None
+
 
 def _get_judge_llm() -> Optional[ChatOpenAI]:
     global _judge_llm
@@ -51,7 +55,9 @@ def _get_judge_llm() -> Optional[ChatOpenAI]:
     try:
         if not Config.OPENAI_API_KEY:
             return None
-        _judge_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=Config.OPENAI_API_KEY)
+        _judge_llm = ChatOpenAI(
+            model="gpt-4o-mini", temperature=0, api_key=Config.OPENAI_API_KEY
+        )
         return _judge_llm
     except Exception:
         _judge_llm = None
@@ -78,20 +84,28 @@ def _record_judge(obj: Dict[str, Any]):
         pass
 
 
-def _run_judge(tenant: str, q: str, control_res: Dict[str, Any], treatment_res: Dict[str, Any]):
+def _run_judge(
+    tenant: str, q: str, control_res: Dict[str, Any], treatment_res: Dict[str, Any]
+):
     llm = _get_judge_llm()
     if llm is None:
         return
     try:
-        c_text = (control_res.get("result") or "") if isinstance(control_res, dict) else ""
-        t_text = (treatment_res.get("result") or "") if isinstance(treatment_res, dict) else ""
+        c_text = (
+            (control_res.get("result") or "") if isinstance(control_res, dict) else ""
+        )
+        t_text = (
+            (treatment_res.get("result") or "")
+            if isinstance(treatment_res, dict)
+            else ""
+        )
         if not c_text and not t_text:
             return
         prompt = (
             "You are a strict evaluator for Q&A. Given a question and two answers, "
             "return STRICT JSON with keys 'control_score', 'treatment_score', 'winner'. "
             "Scores are floats from 0 to 1 reflecting helpfulness and correctness. "
-            "Winner is 'control', 'treatment', or 'tie'.\n\n" 
+            "Winner is 'control', 'treatment', or 'tie'.\n\n"
             f"Question: {q}\n\nControl answer: {c_text}\n\nTreatment answer: {t_text}\n\n"
         )
         msg = [{"role": "user", "content": prompt}]
@@ -116,14 +130,16 @@ def _run_judge(tenant: str, q: str, control_res: Dict[str, Any], treatment_res: 
                 winner = "treatment"
             else:
                 winner = "control"
-        _record_judge({
-            "ts": int(time.time()),
-            "tenant": tenant,
-            "q": q,
-            "control_score": c_score,
-            "treatment_score": t_score,
-            "winner": winner,
-        })
+        _record_judge(
+            {
+                "ts": int(time.time()),
+                "tenant": tenant,
+                "q": q,
+                "control_score": c_score,
+                "treatment_score": t_score,
+                "winner": winner,
+            }
+        )
         try:
             ONLINE_JUDGE_EVENTS.labels(tenant, winner).inc()
         except Exception:
@@ -132,12 +148,21 @@ def _run_judge(tenant: str, q: str, control_res: Dict[str, Any], treatment_res: 
         pass
 
 
-def _shadow_worker(tenant: str, q: str, filters, control_model: str, treatment_model: str, treatment_rerank: bool):
+def _shadow_worker(
+    tenant: str,
+    q: str,
+    filters,
+    control_model: str,
+    treatment_model: str,
+    treatment_rerank: bool,
+):
     try:
         # CONTROL: model A, no rerank
         t0 = time.time()
         try:
-            c_chain = build_chain(filters=filters, llm_model=control_model, rerank_enabled=False)
+            c_chain = build_chain(
+                filters=filters, llm_model=control_model, rerank_enabled=False
+            )
             c_res = c_chain.invoke(q)
             ONLINE_EVAL_LATENCY.labels("control").observe(time.time() - t0)
             ONLINE_EVAL_EVENTS.labels(tenant, "control").inc()
@@ -146,7 +171,11 @@ def _shadow_worker(tenant: str, q: str, filters, control_model: str, treatment_m
         # TREATMENT: configured model, rerank flag
         t1 = time.time()
         try:
-            t_chain = build_chain(filters=filters, llm_model=treatment_model, rerank_enabled=treatment_rerank)
+            t_chain = build_chain(
+                filters=filters,
+                llm_model=treatment_model,
+                rerank_enabled=treatment_rerank,
+            )
             t_res = t_chain.invoke(q)
             ONLINE_EVAL_LATENCY.labels("treatment").observe(time.time() - t1)
             ONLINE_EVAL_EVENTS.labels(tenant, "treatment").inc()
@@ -161,14 +190,24 @@ def _shadow_worker(tenant: str, q: str, filters, control_model: str, treatment_m
                 "model": control_model,
                 "rerank": False,
                 "result": c_res.get("result") if isinstance(c_res, dict) else None,
-                "sources": [getattr(d, "metadata", {}).get("source", "") for d in (c_res.get("source_documents") or [])] if isinstance(c_res, dict) else [],
+                "sources": [
+                    getattr(d, "metadata", {}).get("source", "")
+                    for d in (c_res.get("source_documents") or [])
+                ]
+                if isinstance(c_res, dict)
+                else [],
                 "error": c_res.get("error") if isinstance(c_res, dict) else None,
             },
             "treatment": {
                 "model": treatment_model,
                 "rerank": bool(treatment_rerank),
                 "result": t_res.get("result") if isinstance(t_res, dict) else None,
-                "sources": [getattr(d, "metadata", {}).get("source", "") for d in (t_res.get("source_documents") or [])] if isinstance(t_res, dict) else [],
+                "sources": [
+                    getattr(d, "metadata", {}).get("source", "")
+                    for d in (t_res.get("source_documents") or [])
+                ]
+                if isinstance(t_res, dict)
+                else [],
                 "error": t_res.get("error") if isinstance(t_res, dict) else None,
             },
         }
@@ -179,7 +218,14 @@ def _shadow_worker(tenant: str, q: str, filters, control_model: str, treatment_m
         pass
 
 
-def run_shadow_eval(tenant: str, q: str, filters, treatment_model: str, treatment_rerank: bool, control_model: Optional[str] = None):
+def run_shadow_eval(
+    tenant: str,
+    q: str,
+    filters,
+    treatment_model: str,
+    treatment_rerank: bool,
+    control_model: Optional[str] = None,
+):
     """
     Fire-and-forget shadow evaluation comparing control vs treatment.
     control_model defaults to Config.LLM_MODEL_A; treatment is the live routing.

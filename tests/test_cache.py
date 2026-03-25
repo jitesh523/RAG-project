@@ -14,9 +14,11 @@ def test_inmemory_cache_hit_then_expire(monkeypatch):
     class FakeChain:
         def __init__(self):
             self.calls = 0
+
         def invoke(self, q):
             self.calls += 1
             from types import SimpleNamespace
+
             doc = SimpleNamespace(metadata={"source": "cached.pdf", "page": 1})
             return {"result": f"answer-{self.calls}", "source_documents": [doc]}
 

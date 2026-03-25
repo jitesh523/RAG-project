@@ -8,9 +8,15 @@ def test_ask_filters_sources(monkeypatch):
     # Prepare FakeChain returning mixed sources
     class FakeChain:
         def invoke(self, q):
-            d1 = SimpleNamespace(page_content="a", metadata={"source": "aero_handbook.pdf", "page": 1})
-            d2 = SimpleNamespace(page_content="b", metadata={"source": "turbine.pdf", "page": 2})
-            d3 = SimpleNamespace(page_content="c", metadata={"source": "other.pdf", "page": 3})
+            d1 = SimpleNamespace(
+                page_content="a", metadata={"source": "aero_handbook.pdf", "page": 1}
+            )
+            d2 = SimpleNamespace(
+                page_content="b", metadata={"source": "turbine.pdf", "page": 2}
+            )
+            d3 = SimpleNamespace(
+                page_content="c", metadata={"source": "other.pdf", "page": 3}
+            )
             return {"result": "ok", "source_documents": [d1, d2, d3]}
 
     appmod.qa_chain = FakeChain()

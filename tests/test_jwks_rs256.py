@@ -1,5 +1,4 @@
 from fastapi.testclient import TestClient
-import json
 from tests.conftest import reload_app_with_env
 
 
@@ -12,7 +11,7 @@ def test_metrics_allows_valid_rs256_jwt(monkeypatch):
                 "kty": "RSA",
                 "kid": "abc",
                 "e": "AQAB",
-                "n": "sX3K1wI4Kk9jrafakefakefakefakefakefakefakefakefakefakefakefakefakefakefakefake"
+                "n": "sX3K1wI4Kk9jrafakefakefakefakefakefakefakefakefakefakefakefakefakefakefakefake",
             }
         ]
     }
@@ -20,8 +19,10 @@ def test_metrics_allows_valid_rs256_jwt(monkeypatch):
     class FakeResp:
         def __init__(self, data):
             self._data = data
+
         def raise_for_status(self):
             pass
+
         def json(self):
             return self._data
 
@@ -35,13 +36,16 @@ def test_metrics_allows_valid_rs256_jwt(monkeypatch):
         return {"iss": issuer, "aud": audience}
 
     import src.app.fastapi_app as appmod
+
     monkeypatch.setattr(appmod.requests, "get", fake_get)
     monkeypatch.setattr(appmod.jwt, "decode", fake_decode)
 
     # Header with kid=abc, payload arbitrary, signature ignored by fake_decode
     token = "header.payload.signature"
 
-    appmod = reload_app_with_env(JWT_ALG="RS256", JWT_JWKS_URL="https://example.com/.well-known/jwks.json")
+    appmod = reload_app_with_env(
+        JWT_ALG="RS256", JWT_JWKS_URL="https://example.com/.well-known/jwks.json"
+    )
     client = TestClient(appmod.app)
 
     r = client.get("/metrics", headers={"authorization": f"Bearer {token}"})

@@ -1,6 +1,8 @@
+import os
 from langchain_community.vectorstores import FAISS
 from langchain_community.vectorstores import Milvus as LC_Milvus
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+
 try:
     from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
 except Exception:
@@ -16,7 +18,7 @@ from src.config import Config
 from prometheus_client import Histogram, Counter
 import redis as _redis_mod
 import time
-from typing import List, Tuple, Dict, Any
+from typing import List, Dict, Any
 from src.retrieval.hybrid_v2 import BM25Adapter, blend_candidates
 
 
@@ -46,7 +48,6 @@ class TimedRetriever:
         start = time.time()
         attempt = 0
         delay = max(0.001, Config.RETRY_BASE_DELAY_MS / 1000.0)
-        last_exc = None
         while attempt < max(1, Config.RETRY_MAX_ATTEMPTS):
             try:
                 res = self._inner.get_relevant_documents(query)
@@ -72,7 +73,9 @@ class HybridRetriever:
     blended score: alpha*vector_sim + (1-alpha)*tf_norm.
     """
 
-    def __init__(self, vectorstore, backend_label: str, search_kwargs: dict | None = None):
+    def __init__(
+        self, vectorstore, backend_label: str, search_kwargs: dict | None = None
+    ):
         self._vs = vectorstore
         self._backend_label = backend_label
         self._search_kwargs = search_kwargs or {}
@@ -93,7 +96,9 @@ class HybridRetriever:
             try:
                 # fetch_k for broader candidate set
                 fetch_k = max(Config.RETRIEVER_FETCH_K, Config.RETRIEVER_K)
-                pairs = self._vs.similarity_search_with_score(query, k=fetch_k, **self._search_kwargs)
+                pairs = self._vs.similarity_search_with_score(
+                    query, k=fetch_k, **self._search_kwargs
+                )
                 # Extract distances/scores (lower is better) and convert to similarity
                 if not pairs:
                     elapsed = time.time() - start
@@ -102,7 +107,7 @@ class HybridRetriever:
                 dists = [p[1] for p in pairs]
                 dmin, dmax = min(dists), max(dists)
                 sims = []
-                for (doc, dist) in pairs:
+                for doc, dist in pairs:
                     if dmax == dmin:
                         v_sim = 1.0
                     else:
@@ -123,7 +128,12 @@ class HybridRetriever:
                 top_docs = [d for (blended, d, v_sim, tf) in top]
                 # capture explainability
                 self.last_scores = [
-                    {"doc_id": id(d), "blended": float(blended), "v_sim": float(v_sim), "tf": float(tf)}
+                    {
+                        "doc_id": id(d),
+                        "blended": float(blended),
+                        "v_sim": float(v_sim),
+                        "tf": float(tf),
+                    }
                     for (blended, d, v_sim, tf) in top
                 ]
                 elapsed = time.time() - start
@@ -139,6 +149,7 @@ class HybridRetriever:
                     elapsed = time.time() - start
                     VECTOR_SEARCH_DURATION.labels(self._backend_label).observe(elapsed)
                     raise
+
 
 def _milvus_expr_from_filters(filters) -> str | None:
     if not filters:
@@ -161,9 +172,11 @@ def _milvus_expr_from_filters(filters) -> str | None:
         return None
     return " and ".join(parts) if parts else None
 
+
 def _faiss_filter_callable_from_filters(filters):
     if not filters:
         return None
+
     def _pred(md: dict) -> bool:
         try:
             if getattr(filters, "sources", None):
@@ -174,6 +187,7 @@ def _faiss_filter_callable_from_filters(filters):
                     return False
             if getattr(filters, "date_from", None) or getattr(filters, "date_to", None):
                 from datetime import datetime
+
                 ds = str(md.get("date", ""))[:10]
                 if not ds:
                     return False
@@ -191,7 +205,9 @@ def _faiss_filter_callable_from_filters(filters):
             return True
         except Exception:
             return False
+
     return _pred
+
 
 def _select_llm(provider: str | None, model: str):
     prov = (provider or "openai").lower()
@@ -201,11 +217,19 @@ def _select_llm(provider: str | None, model: str):
             temperature=0,
             api_key=Config.OPENAI_API_KEY,
             azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-            api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01")
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01"),
         )
-    if prov == "bedrock" and ChatBedrock is not None and Config.BEDROCK_CHAT_MODEL and Config.BEDROCK_REGION:
-        return ChatBedrock(model_id=Config.BEDROCK_CHAT_MODEL, region_name=Config.BEDROCK_REGION)
+    if (
+        prov == "bedrock"
+        and ChatBedrock is not None
+        and Config.BEDROCK_CHAT_MODEL
+        and Config.BEDROCK_REGION
+    ):
+        return ChatBedrock(
+            model_id=Config.BEDROCK_CHAT_MODEL, region_name=Config.BEDROCK_REGION
+        )
     return ChatOpenAI(model=model, temperature=0, api_key=Config.OPENAI_API_KEY)
+
 
 def _emb_provider_for_doc(doc_type: str | None) -> tuple[str, str]:
     # returns (provider, model)
@@ -222,7 +246,9 @@ def _emb_provider_for_doc(doc_type: str | None) -> tuple[str, str]:
                     mp[k.strip()] = v.strip()
             key = (doc_type or "default").lower()
             sel = mp.get(key, mp.get("default", "large"))
-            model = Config.EMBED_MODEL_SMALL if sel == "small" else Config.EMBED_MODEL_LARGE
+            model = (
+                Config.EMBED_MODEL_SMALL if sel == "small" else Config.EMBED_MODEL_LARGE
+            )
     except Exception:
         pass
     # Redis overrides per doc_type
@@ -240,23 +266,45 @@ def _emb_provider_for_doc(doc_type: str | None) -> tuple[str, str]:
         pass
     return provider, model
 
+
 def _select_embeddings(provider: str, model: str):
     if provider == "azure_openai" and AzureOpenAIEmbeddings is not None:
-        return AzureOpenAIEmbeddings(azure_deployment=model, api_key=Config.OPENAI_API_KEY, azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"), api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01"))
-    if provider == "bedrock" and BedrockEmbeddings is not None and (model or Config.BEDROCK_EMBEDDING_MODEL) and Config.BEDROCK_REGION:
+        return AzureOpenAIEmbeddings(
+            azure_deployment=model,
+            api_key=Config.OPENAI_API_KEY,
+            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01"),
+        )
+    if (
+        provider == "bedrock"
+        and BedrockEmbeddings is not None
+        and (model or Config.BEDROCK_EMBEDDING_MODEL)
+        and Config.BEDROCK_REGION
+    ):
         mid = model or Config.BEDROCK_EMBEDDING_MODEL
         return BedrockEmbeddings(model_id=mid, region_name=Config.BEDROCK_REGION)
     return OpenAIEmbeddings(model=model, api_key=Config.OPENAI_API_KEY)
 
-def build_chain(filters=None, llm_model: str | None = None, rerank_enabled: bool | None = None, k_override: int | None = None, fetch_k_override: int | None = None, milvus_collection_override: str | None = None, llm_provider: str | None = None):
+
+def build_chain(
+    filters=None,
+    llm_model: str | None = None,
+    rerank_enabled: bool | None = None,
+    k_override: int | None = None,
+    fetch_k_override: int | None = None,
+    milvus_collection_override: str | None = None,
+    llm_provider: str | None = None,
+):
     if Config.MOCK_MODE:
+
         class _FakeChain:
             def invoke(self, q):
                 from types import SimpleNamespace
+
                 doc = SimpleNamespace(metadata={"source": "mock.pdf", "page": 1})
                 return {"result": f"mock answer: {q}", "source_documents": [doc]}
+
         return _FakeChain()
-    import os
     model = llm_model or "gpt-4o-mini"
     llm = _select_llm(llm_provider, model)
     doc_type = None
@@ -278,16 +326,20 @@ def build_chain(filters=None, llm_model: str | None = None, rerank_enabled: bool
                 pref = (Config.DR_READ_PREFERRED or "primary").lower()
                 try:
                     if Config.REDIS_URL:
-                        r = _redis_mod.Redis.from_url(Config.REDIS_URL, decode_responses=True)
+                        r = _redis_mod.Redis.from_url(
+                            Config.REDIS_URL, decode_responses=True
+                        )
                         v = (r.get("dr:read_preferred") or pref).lower()
-                        if v in ("primary","secondary"):
+                        if v in ("primary", "secondary"):
                             pref = v
                 except Exception:
                     pass
                 if pref == "secondary":
                     host = Config.MILVUS_HOST_SECONDARY
                     port = str(Config.MILVUS_PORT_SECONDARY)
-                    cname = milvus_collection_override or Config.MILVUS_COLLECTION_SECONDARY
+                    cname = (
+                        milvus_collection_override or Config.MILVUS_COLLECTION_SECONDARY
+                    )
             vs = LC_Milvus(
                 embedding_function=embeddings,
                 collection_name=cname,
@@ -304,7 +356,9 @@ def build_chain(filters=None, llm_model: str | None = None, rerank_enabled: bool
 
     # search kwargs based on filters and backend (allow overrides)
     k_eff = k_override if k_override is not None else Config.RETRIEVER_K
-    fk_eff = fetch_k_override if fetch_k_override is not None else Config.RETRIEVER_FETCH_K
+    fk_eff = (
+        fetch_k_override if fetch_k_override is not None else Config.RETRIEVER_FETCH_K
+    )
     search_kwargs = {"k": k_eff, "fetch_k": fk_eff}
     if backend == "milvus":
         expr = _milvus_expr_from_filters(filters)
@@ -337,18 +391,26 @@ def build_chain(filters=None, llm_model: str | None = None, rerank_enabled: bool
                 while attempt < max(1, Config.RETRY_MAX_ATTEMPTS):
                     try:
                         fetch_k = max(fk_eff, k_eff)
-                        pairs = self._inner.similarity_search_with_score(query, k=fetch_k, **self._search_kwargs)
+                        pairs = self._inner.similarity_search_with_score(
+                            query, k=fetch_k, **self._search_kwargs
+                        )
                         if not pairs:
-                            VECTOR_SEARCH_DURATION.labels(self._backend_label).observe(time.time() - start)
+                            VECTOR_SEARCH_DURATION.labels(self._backend_label).observe(
+                                time.time() - start
+                            )
                             return []
                         # Prepare candidate corpus for BM25
-                        cand_texts: List[str] = [getattr(d, "page_content", "") for (d, _) in pairs]
-                        cand_meta: List[Dict[str, Any]] = [getattr(d, "metadata", {}) for (d, _) in pairs]
+                        cand_texts: List[str] = [
+                            getattr(d, "page_content", "") for (d, _) in pairs
+                        ]
+                        cand_meta: List[Dict[str, Any]] = [
+                            getattr(d, "metadata", {}) for (d, _) in pairs
+                        ]
                         # Dense scores (convert distances to similarity in [0,1])
                         dists = [s for (_, s) in pairs]
                         dmin, dmax = min(dists), max(dists)
                         dense = []
-                        for (doc, dist) in pairs:
+                        for doc, dist in pairs:
                             if dmax == dmin:
                                 sim = 1.0
                             else:
@@ -362,20 +424,35 @@ def build_chain(filters=None, llm_model: str | None = None, rerank_enabled: bool
                         except Exception:
                             bm25 = []
                         # Weights: Redis override or Config defaults
-                        weights = {"dense": Config.HYBRID_V2_DENSE_WEIGHT, "bm25": Config.HYBRID_V2_BM25_WEIGHT}
+                        weights = {
+                            "dense": Config.HYBRID_V2_DENSE_WEIGHT,
+                            "bm25": Config.HYBRID_V2_BM25_WEIGHT,
+                        }
                         try:
                             if Config.REDIS_URL:
-                                r = _redis_mod.Redis.from_url(Config.REDIS_URL, decode_responses=True)
+                                r = _redis_mod.Redis.from_url(
+                                    Config.REDIS_URL, decode_responses=True
+                                )
                                 rd = r.hgetall("retrieval:weights") or {}
-                                if "dense" in rd: weights["dense"] = float(rd["dense"]) 
-                                if "bm25" in rd: weights["bm25"] = float(rd["bm25"]) 
+                                if "dense" in rd:
+                                    weights["dense"] = float(rd["dense"])
+                                if "bm25" in rd:
+                                    weights["bm25"] = float(rd["bm25"])
                         except Exception:
                             pass
-                        blended = blend_candidates(dense, bm25, weights=weights, k=Config.RETRIEVER_K)
+                        blended = blend_candidates(
+                            dense, bm25, weights=weights, k=Config.RETRIEVER_K
+                        )
+
                         # Map back to documents matching metadata source+page
                         def _key(md):
-                            return f"{str(md.get('source',''))}#{str(md.get('page',''))}"
-                        docmap = {_key(getattr(d, 'metadata', {})): d for (d, _) in pairs}
+                            return (
+                                f"{str(md.get('source', ''))}#{str(md.get('page', ''))}"
+                            )
+
+                        docmap = {
+                            _key(getattr(d, "metadata", {})): d for (d, _) in pairs
+                        }
                         out_docs = []
                         for _, md in blended:
                             k = _key(md)
@@ -384,7 +461,9 @@ def build_chain(filters=None, llm_model: str | None = None, rerank_enabled: bool
                             if len(out_docs) >= k_eff:
                                 break
                         self.last_blend = blended
-                        VECTOR_SEARCH_DURATION.labels(self._backend_label).observe(time.time() - start)
+                        VECTOR_SEARCH_DURATION.labels(self._backend_label).observe(
+                            time.time() - start
+                        )
                         return out_docs
                     except Exception:
                         attempt += 1
@@ -393,17 +472,25 @@ def build_chain(filters=None, llm_model: str | None = None, rerank_enabled: bool
                             time.sleep(delay)
                             delay *= 2
                         else:
-                            VECTOR_SEARCH_DURATION.labels(self._backend_label).observe(time.time() - start)
+                            VECTOR_SEARCH_DURATION.labels(self._backend_label).observe(
+                                time.time() - start
+                            )
                             raise
 
         base_retriever = vs  # vectorstore instance
-        retriever = HybridV2Retriever(base_retriever, backend_label=backend, search_kwargs=search_kwargs)
+        retriever = HybridV2Retriever(
+            base_retriever, backend_label=backend, search_kwargs=search_kwargs
+        )
     elif Config.HYBRID_ENABLED:
-        retriever = HybridRetriever(vs, backend_label=backend, search_kwargs=search_kwargs)
+        retriever = HybridRetriever(
+            vs, backend_label=backend, search_kwargs=search_kwargs
+        )
     else:
         base_retriever = vs.as_retriever(search_type="mmr", search_kwargs=search_kwargs)
         retriever = TimedRetriever(base_retriever, backend_label=backend)
-    qa = RetrievalQA.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
+    qa = RetrievalQA.from_chain_type(
+        llm=llm, retriever=retriever, return_source_documents=True
+    )
     try:
         setattr(qa, "_retriever_ref", retriever)
     except Exception:

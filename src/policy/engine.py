@@ -34,7 +34,9 @@ def _merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     return x
 
 
-def evaluate_pre(query_ctx: Dict[str, Any], policy: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+def evaluate_pre(
+    query_ctx: Dict[str, Any], policy: Dict[str, Any]
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Return (filter_hints, decision). filter_hints merges into AskFilters.
     decision may contain {deny: bool, reason: str}.
@@ -50,7 +52,9 @@ def evaluate_pre(query_ctx: Dict[str, Any], policy: Dict[str, Any]) -> Tuple[Dic
         allowed_doc_types = set(policy.get("allowed_doc_types") or [])
         if allowed_doc_types:
             # for now choose single doc_type if provided one; otherwise leave list for UI/reference
-            filt["doc_type"] = query_ctx.get("doc_type") or next(iter(allowed_doc_types))
+            filt["doc_type"] = query_ctx.get("doc_type") or next(
+                iter(allowed_doc_types)
+            )
         residency = policy.get("residency") or []
         if residency:
             filt["region"] = query_ctx.get("region") or residency[0]
@@ -60,7 +64,9 @@ def evaluate_pre(query_ctx: Dict[str, Any], policy: Dict[str, Any]) -> Tuple[Dic
         POLICY_EVAL_DURATION.observe(time.time() - t0)
 
 
-def evaluate_post(answer: str, sources: list, policy: Dict[str, Any], override: bool = False) -> Tuple[str, list, Dict[str, Any]]:
+def evaluate_post(
+    answer: str, sources: list, policy: Dict[str, Any], override: bool = False
+) -> Tuple[str, list, Dict[str, Any]]:
     """
     Apply PII tiering and citation restrictions per policy.
     Returns (answer, sources, decision)
@@ -83,7 +89,12 @@ def evaluate_post(answer: str, sources: list, policy: Dict[str, Any], override: 
         if tier == "mask":
             # coarse masking for emails and phone-like patterns
             import re
-            ans = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "[MASKED_EMAIL]", answer or "")
+
+            ans = re.sub(
+                r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+                "[MASKED_EMAIL]",
+                answer or "",
+            )
             ans = re.sub(r"\b(?:\+?\d[\s-]?){7,15}\b", "[MASKED_PHONE]", ans)
             # mask sources by hiding filename
             masked_sources = []
@@ -96,7 +107,12 @@ def evaluate_post(answer: str, sources: list, policy: Dict[str, Any], override: 
         if tier == "redact":
             # reuse same masking but keep source names
             import re
-            ans = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "[REDACTED_EMAIL]", answer or "")
+
+            ans = re.sub(
+                r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+                "[REDACTED_EMAIL]",
+                answer or "",
+            )
             ans = re.sub(r"\b(?:\+?\d[\s-]?){7,15}\b", "[REDACTED_PHONE]", ans)
             return (ans, sources, {"redacted": True})
         # allow

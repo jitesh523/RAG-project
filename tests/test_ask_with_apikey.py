@@ -1,5 +1,4 @@
 from fastapi.testclient import TestClient
-import os
 
 from tests.conftest import reload_app_with_env
 

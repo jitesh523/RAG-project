@@ -1,5 +1,4 @@
 from fastapi.testclient import TestClient
-from types import SimpleNamespace
 
 from src.app import fastapi_app as appmod
 

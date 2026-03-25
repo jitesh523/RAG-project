@@ -1,5 +1,4 @@
 from types import SimpleNamespace
-from datetime import datetime
 
 from src.app.deps import _milvus_expr_from_filters, _faiss_filter_callable_from_filters
 

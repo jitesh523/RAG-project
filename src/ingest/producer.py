@@ -1,4 +1,6 @@
-import argparse, os, hashlib, json
+import argparse
+import os
+import hashlib
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from src.config import Config
@@ -13,10 +15,23 @@ def _load_file(path: str):
         return loader.load()
     try:
         from unstructured.partition.auto import partition
+
         els = partition(filename=path)
         txt = "\n".join([str(e) for e in els])
         from types import SimpleNamespace
-        return [SimpleNamespace(page_content=txt, metadata={"source": os.path.basename(path), "doc_type": ext[1:], "date": datetime.utcfromtimestamp(os.path.getmtime(path)).date().isoformat()})]
+
+        return [
+            SimpleNamespace(
+                page_content=txt,
+                metadata={
+                    "source": os.path.basename(path),
+                    "doc_type": ext[1:],
+                    "date": datetime.utcfromtimestamp(os.path.getmtime(path))
+                    .date()
+                    .isoformat(),
+                },
+            )
+        ]
     except Exception:
         return []
 
@@ -35,7 +50,9 @@ def load_docs(input_dir: str):
 
 
 def chunk_docs(docs):
-    splitter = RecursiveCharacterTextSplitter(chunk_size=Config.CHUNK_SIZE, chunk_overlap=Config.CHUNK_OVERLAP)
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=Config.CHUNK_SIZE, chunk_overlap=Config.CHUNK_OVERLAP
+    )
     return splitter.split_documents(docs)
 
 

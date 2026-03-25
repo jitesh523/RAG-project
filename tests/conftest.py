@@ -28,9 +28,11 @@ def reload_app_with_env(**env) -> types.ModuleType:
     with _env(**env):
         # Reload config first so class attributes rebind from env
         import src.config as cfg
+
         importlib.reload(cfg)
         # Now reload app module to rebuild routes/middleware
         import src.app.fastapi_app as appmod
+
         importlib.reload(appmod)
         return appmod
 
