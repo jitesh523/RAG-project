@@ -15,7 +15,7 @@ jobs:
       - run: ruff check .
       - run: black --check .
       - run: bandit -r src -q
-      - run: pytest -q
+      - run: python -m pytest -q
   e2e:
     needs: build-test
     runs-on: ubuntu-latest
