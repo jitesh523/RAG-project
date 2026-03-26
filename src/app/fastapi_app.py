@@ -1997,7 +1997,9 @@ def require_auth(request: Request, status_code: int = 401) -> None:
     authz = request.headers.get("authorization", "")
     if authz.lower().startswith("bearer ") and _verify_jwt(authz.split(" ", 1)[1]):
         return
-    raise HTTPException(status_code=status_code, detail="Invalid or missing API key/JWT")
+    raise HTTPException(
+        status_code=status_code, detail="Invalid or missing API key/JWT"
+    )
 
 
 def _get_or_create_metric(cls, name, documentation, labelnames=()):
