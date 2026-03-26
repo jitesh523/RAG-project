@@ -50,7 +50,7 @@ def _derive_doc_type_from_source(src: str) -> str:
 
 def _golden_hash(path: str) -> str:
     try:
-        h = hashlib.sha1()
+        h = hashlib.sha1(usedforsecurity=False)
         with open(path, "rb") as f:
             while True:
                 b = f.read(8192)

@@ -62,7 +62,9 @@ def enqueue(chunks):
     for c in chunks:
         text = c.page_content
         meta = c.metadata or {}
-        h = hashlib.sha1((text or "").encode("utf-8")).hexdigest()
+        h = hashlib.sha1(
+            (text or "").encode("utf-8"), usedforsecurity=False
+        ).hexdigest()
         fields = {
             "id": h,
             "text": text,

@@ -190,24 +190,28 @@ def _shadow_worker(
                 "model": control_model,
                 "rerank": False,
                 "result": c_res.get("result") if isinstance(c_res, dict) else None,
-                "sources": [
-                    getattr(d, "metadata", {}).get("source", "")
-                    for d in (c_res.get("source_documents") or [])
-                ]
-                if isinstance(c_res, dict)
-                else [],
+                "sources": (
+                    [
+                        getattr(d, "metadata", {}).get("source", "")
+                        for d in (c_res.get("source_documents") or [])
+                    ]
+                    if isinstance(c_res, dict)
+                    else []
+                ),
                 "error": c_res.get("error") if isinstance(c_res, dict) else None,
             },
             "treatment": {
                 "model": treatment_model,
                 "rerank": bool(treatment_rerank),
                 "result": t_res.get("result") if isinstance(t_res, dict) else None,
-                "sources": [
-                    getattr(d, "metadata", {}).get("source", "")
-                    for d in (t_res.get("source_documents") or [])
-                ]
-                if isinstance(t_res, dict)
-                else [],
+                "sources": (
+                    [
+                        getattr(d, "metadata", {}).get("source", "")
+                        for d in (t_res.get("source_documents") or [])
+                    ]
+                    if isinstance(t_res, dict)
+                    else []
+                ),
                 "error": t_res.get("error") if isinstance(t_res, dict) else None,
             },
         }

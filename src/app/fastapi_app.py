@@ -1792,7 +1792,7 @@ def _simhash(q: str, filters) -> str:
     except Exception:
         f = {}
     s = base + "|" + json.dumps(f, sort_keys=True)
-    return hashlib.sha1(s.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha1(s.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
 
 
 # Budget helpers (Redis-first with in-memory fallback)
@@ -2592,7 +2592,7 @@ def _maybe_eval_math(q: str):
         if not re.fullmatch(r"[0-9\s\+\-\*\/\(\)\.]+", expr):
             return None
         # Safe eval: no builtins, only math operators
-        val = eval(expr, {"__builtins__": None}, {})  # type: ignore
+        val = eval(expr, {"__builtins__": None}, {})  # nosec B307  # type: ignore
         if isinstance(val, (int, float)):
             return float(val)
         return None
@@ -3117,7 +3117,8 @@ def ask(req: AskReq, request: Request):
             coarse_cache_key = (
                 "ask:coarse:"
                 + hashlib.sha1(
-                    json.dumps(coarse_key_raw, sort_keys=True).encode("utf-8")
+                    json.dumps(coarse_key_raw, sort_keys=True).encode("utf-8"),
+                    usedforsecurity=False,
                 ).hexdigest()
             )
             v = _redis.get(coarse_cache_key)
@@ -3443,9 +3444,11 @@ def ask(req: AskReq, request: Request):
                 members = _redis.smembers("deny:sources")
                 deny = set(
                     [
-                        m.decode("utf-8")
-                        if isinstance(m, (bytes, bytearray))
-                        else str(m)
+                        (
+                            m.decode("utf-8")
+                            if isinstance(m, (bytes, bytearray))
+                            else str(m)
+                        )
                         for m in members
                     ]
                 )
@@ -3629,7 +3632,8 @@ def ask(req: AskReq, request: Request):
             fine_key = (
                 "ask:fine:"
                 + hashlib.sha1(
-                    json.dumps(fine_key_raw, sort_keys=True).encode("utf-8")
+                    (str(req.tenant) + str(req.variant)).encode("utf-8"),
+                    usedforsecurity=False,
                 ).hexdigest()
             )
             ttl = max(1, _tenant_ttl(tenant_label))
@@ -3898,9 +3902,9 @@ def submit_feedback(req: FeedbackReq, request: Request):
         "query": req.query,
         "answer": req.answer,
         "clicked_sources": req.clicked_sources or [],
-        "hallucinated": bool(req.hallucinated)
-        if req.hallucinated is not None
-        else None,
+        "hallucinated": (
+            bool(req.hallucinated) if req.hallucinated is not None else None
+        ),
         "style_score": req.style_score,
         "tags": req.tags or [],
         "ts": int(time.time()),
@@ -4508,9 +4512,11 @@ def ask_stream(query: str, request: Request):
                         members = _redis.smembers("deny:sources")
                         deny = set(
                             [
-                                m.decode("utf-8")
-                                if isinstance(m, (bytes, bytearray))
-                                else str(m)
+                                (
+                                    m.decode("utf-8")
+                                    if isinstance(m, (bytes, bytearray))
+                                    else str(m)
+                                )
                                 for m in members
                             ]
                         )

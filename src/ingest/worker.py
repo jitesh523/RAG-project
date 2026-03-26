@@ -42,7 +42,10 @@ def _parse_fields(fields: Dict[str, str]):
     doc_type = fields.get("doc_type", "")
     date = fields.get("date", "")
     # derive id if not present
-    mid = fields.get("id") or hashlib.sha1((text or "").encode("utf-8")).hexdigest()
+    mid = (
+        fields.get("id")
+        or hashlib.sha1((text or "").encode("utf-8"), usedforsecurity=False).hexdigest()
+    )
     return {
         "id": mid,
         "text": text,
