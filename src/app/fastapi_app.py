@@ -2770,7 +2770,9 @@ def _startup():
         qa_chain = build_chain()
         # Basic readiness check: FAISS store presence + chain built
         faiss_path_exists = os.path.isdir("./faiss_store")
-        if Config.RETRIEVER_BACKEND == "milvus":
+        if Config.MOCK_MODE:
+            READY = True
+        elif Config.RETRIEVER_BACKEND == "milvus":
             # Retry Milvus readiness with backoff
             attempt = 0
             delay = max(0.001, Config.RETRY_BASE_DELAY_MS / 1000.0)
