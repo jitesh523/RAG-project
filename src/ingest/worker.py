@@ -2,11 +2,15 @@ import os
 import time
 import hashlib
 import redis
+import logging
 from typing import Dict
+
 from src.config import Config
 from src.index.milvus_index import insert_rows
 from langchain_openai import OpenAIEmbeddings
 from prometheus_client import Counter, Histogram, REGISTRY, pushadd_to_gateway
+
+logger = logging.getLogger(__name__)
 
 INGEST_WORKER_PROCESSED = Counter(
     "ingest_worker_processed_total", "Total messages processed"
@@ -62,8 +66,8 @@ def _parse_model_map(map_str: str):
         for p in [x.strip() for x in (map_str or "").split(",") if x.strip()]:
             k, v = p.split(":", 1)
             mp[k.strip()] = v.strip().lower()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Failed to parse model map '%s': %s", map_str, e)
     return mp
 
 
@@ -148,31 +152,38 @@ def run_worker():
                                     r.set(kmin, d)
                                 if not cur_max or d > cur_max:
                                     r.set(kmax, d)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug(
+                                "Failed to update filter metadata in Redis: %s", e
+                            )
                         r.sadd(seen_key, data["id"])
                         r.xack(stream, group, msg_id)
                         INGEST_WORKER_PROCESSED.inc()
-                    except Exception:
+                    except Exception as e:
                         # retry logic using XCLAIM is more advanced; here we push to DLQ after max retries
+                        logger.warning("Error processing message %s: %s", msg_id, e)
                         try:
                             attempts = int(fields.get("attempts", "0")) + 1
-                        except Exception:
+                        except (ValueError, TypeError):
                             attempts = 1
+
                         if attempts >= Config.INGEST_MAX_RETRIES:
                             try:
                                 fields["attempts"] = str(attempts)
                                 r.xadd(dlq, fields)
-                            except Exception:
-                                pass
+                            except Exception as ex:
+                                logger.debug("Failed to add message to DLQ: %s", ex)
                             r.xack(stream, group, msg_id)
                             INGEST_WORKER_FAILED.inc()
                         else:
                             fields["attempts"] = str(attempts)
                             # requeue by adding back to stream
-                            r.xadd(stream, fields)
-                            r.xack(stream, group, msg_id)
-                            INGEST_WORKER_RETRIES.inc()
+                            try:
+                                r.xadd(stream, fields)
+                                r.xack(stream, group, msg_id)
+                                INGEST_WORKER_RETRIES.inc()
+                            except Exception as ex:
+                                logger.error("Failed to requeue message: %s", ex)
                     finally:
                         INGEST_WORKER_HANDLE.observe(time.time() - start)
                         if Config.PUSHGATEWAY_URL:
@@ -182,9 +193,12 @@ def run_worker():
                                     job="ingest-worker",
                                     registry=REGISTRY,
                                 )
-                            except Exception:
-                                pass
-        except Exception:
+                            except Exception as ex:
+                                logger.debug(
+                                    "Failed to push metrics to Pushgateway: %s", ex
+                                )
+        except Exception as e:
+            logger.error("Worker loop encountered an error: %s", e)
             time.sleep(1)
 
 

@@ -1,8 +1,11 @@
+import logging
 import os
 import json
 import time
 from typing import List, Dict, Any
 from src.config import Config
+
+logger = logging.getLogger(__name__)
 
 try:
     import redis
@@ -33,11 +36,12 @@ def collect_feedback(
                     if tenant and obj.get("tenant") != tenant:
                         continue
                     out.append(obj)
-                except Exception:
+                except Exception as e:
+                    logger.debug("Silent exception (continue): %s", e)
                     continue
             return out
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Silent exception (pass): %s", e)
     # fallback: no memory fallback available here; return empty
     return out
 

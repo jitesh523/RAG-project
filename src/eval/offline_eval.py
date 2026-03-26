@@ -1,3 +1,4 @@
+import logging
 import json
 import time
 from types import SimpleNamespace
@@ -6,6 +7,8 @@ from prometheus_client import Gauge, Counter, pushadd_to_gateway, REGISTRY
 import hashlib
 from src.config import Config
 from src.app.deps import build_chain
+
+logger = logging.getLogger(__name__)
 
 # Offline evaluation over a golden set
 # Golden JSONL schema per line: {"tenant": "t1", "query": "...", "expected_sources": ["foo.pdf"], "expected_answer_contains": ["term1", "term2"]}
@@ -22,7 +25,8 @@ def _load_golden(path: str) -> List[Dict[str, Any]]:
                 try:
                     obj = json.loads(line)
                     items.append(obj)
-                except Exception:
+                except Exception as e:
+                    logger.debug("Silent exception (continue): %s", e)
                     continue
     except FileNotFoundError:
         return []
@@ -193,8 +197,8 @@ def run_offline_eval(golden_path: str | None = None) -> Dict[str, Any]:
                 job=Config.EVAL_PUSHGATEWAY_JOB,
                 registry=REGISTRY,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Silent exception (pass): %s", e)
     return out
 
 

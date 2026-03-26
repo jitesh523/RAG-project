@@ -1,3 +1,4 @@
+import logging
 import time
 import json
 import threading
@@ -7,6 +8,8 @@ from prometheus_client import Counter, Histogram
 from src.config import Config
 from src.app.deps import build_chain
 from langchain_openai import ChatOpenAI
+
+logger = logging.getLogger(__name__)
 
 ONLINE_EVAL_EVENTS = Counter(
     "online_eval_events_total",
@@ -70,8 +73,8 @@ def _record_event(obj: Dict[str, Any]):
         if r is not None:
             r.lpush("online:eval", json.dumps(obj))
             r.ltrim("online:eval", 0, 9999)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
 
 
 def _record_judge(obj: Dict[str, Any]):
@@ -80,8 +83,8 @@ def _record_judge(obj: Dict[str, Any]):
         if r is not None:
             r.lpush("online:judge", json.dumps(obj))
             r.ltrim("online:judge", 0, 9999)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
 
 
 def _run_judge(
@@ -142,10 +145,10 @@ def _run_judge(
         )
         try:
             ONLINE_JUDGE_EVENTS.labels(tenant, winner).inc()
-        except Exception:
-            pass
-    except Exception:
-        pass
+        except Exception as e:
+            logger.debug("Silent exception (pass): %s", e)
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
 
 
 def _shadow_worker(
@@ -218,8 +221,8 @@ def _shadow_worker(
         _record_event(evt)
         # LLM-as-judge scoring
         _run_judge(tenant, q, evt["control"], evt["treatment"])
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
 
 
 def run_shadow_eval(
@@ -244,5 +247,5 @@ def run_shadow_eval(
             daemon=True,
         )
         t.start()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)

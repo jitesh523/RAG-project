@@ -1,8 +1,11 @@
+import logging
 import json
 import time
 from typing import Dict, Any, Tuple
 
 from prometheus_client import Histogram, Counter
+
+logger = logging.getLogger(__name__)
 
 POLICY_EVAL_DURATION = Histogram(
     "policy_eval_duration_seconds",
@@ -77,14 +80,14 @@ def evaluate_post(
         if override and policy.get("break_glass"):
             try:
                 POLICY_OVERRIDES_TOTAL.inc()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to increment policy overrides counter: %s", e)
             return (answer, sources, {"overridden": True})
         if tier == "deny":
             try:
                 POLICY_DENIES_TOTAL.labels(reason="pii_deny").inc()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to increment policy denies counter: %s", e)
             return ("", [], {"denied": True, "reason": "pii_deny"})
         if tier == "mask":
             # coarse masking for emails and phone-like patterns
@@ -130,6 +133,6 @@ def load_policy(redis_client, tenant: str) -> Dict[str, Any]:
             if raw:
                 tenant_pol = json.loads(raw)
                 pol = _merge(DEFAULT_POLICY, tenant_pol)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Failed to load policy for tenant %s: %s", tenant, e)
     return pol

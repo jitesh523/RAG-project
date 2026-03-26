@@ -10,10 +10,16 @@ from typing import List, Tuple, Optional
 from src.config import Config
 from prometheus_client import Counter
 import time
+import logging
+
+logger = logging.getLogger(__name__)
 
 try:
     import redis as _r
-except Exception:
+except Exception as e:
+    logger.debug(
+        "Optional redis import failed (this is okay if redis is not used): %s", e
+    )
     _r = None
 
 EMBED_DIM = 3072  # OpenAI text-embedding-3-large
@@ -40,7 +46,8 @@ def connect_secondary():
             port=str(Config.MILVUS_PORT_SECONDARY),
         )
         return True
-    except Exception:
+    except Exception as e:
+        logger.debug("Secondary Milvus connection failed: %s", e)
         return False
 
 
@@ -106,8 +113,8 @@ def _ensure_partition(col: Collection, partition: str):
     try:
         if partition and partition not in [p.name for p in col.partitions]:
             col.create_partition(partition)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Partition %s may already exist or error: %s", partition, e)
 
 
 def insert_rows(
@@ -130,8 +137,8 @@ def insert_rows(
         if _r is not None and Config.REDIS_URL:
             rc = _r.Redis.from_url(Config.REDIS_URL, decode_responses=True)
             rc.set("dr:last_write_ts:primary", str(int(time.time())))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Failed to record primary write timestamp: %s", e)
     # optional dual-write to secondary
     if Config.DR_ENABLED and Config.DR_DUAL_WRITE and Config.MILVUS_HOST_SECONDARY:
         try:
@@ -148,13 +155,13 @@ def insert_rows(
                     if _r is not None and Config.REDIS_URL:
                         rc = _r.Redis.from_url(Config.REDIS_URL, decode_responses=True)
                         rc.set("dr:last_write_ts:secondary", str(int(time.time())))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Failed to record secondary write timestamp: %s", e)
         except Exception:
             try:
                 DR_DUAL_WRITE_ERRORS_TOTAL.inc()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to increment DR error counter: %s", e)
 
 
 def check_milvus_readiness(name: str = Config.MILVUS_COLLECTION) -> dict:
@@ -171,9 +178,8 @@ def check_milvus_readiness(name: str = Config.MILVUS_COLLECTION) -> dict:
             # Try to load; if already loaded this is no-op
             col.load()
             info["loaded"] = True
-    except Exception:
-        # Keep defaults; caller can inspect
-        pass
+    except Exception as e:
+        logger.warning("Milvus readiness check failed: %s", e)
     return info
 
 
@@ -192,15 +198,16 @@ def reembed_active_to_canary(
     # load to ensure query works
     try:
         col.load()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
     try:
         # Best-effort: pull up to 'limit' docs
         docs = col.query(
             expr="", output_fields=["id", "text", "source", "page"], limit=limit
         )
-    except Exception:
+    except Exception as e:
         docs = []
+        logger.warning("Failed to query active collection: %s", e)
     # Embed and write in batches
     total = 0
     buf_ids, buf_embs, buf_texts, buf_sources, buf_pages = [], [], [], [], []
@@ -229,7 +236,8 @@ def reembed_active_to_canary(
             buf_pages.append(page)
             if len(buf_ids) >= max(1, int(batch_size)):
                 _flush()
-        except Exception:
+        except Exception as e:
+            logger.error("Error embedding document %s: %s", tid, e)
             continue
     _flush()
     # record metadata for canary
@@ -240,8 +248,8 @@ def reembed_active_to_canary(
                 "index:canary:embed_meta",
                 mapping={"provider": provider, "model": model, "rows": str(total)},
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Failed to record metadata for canary: %s", e)
     return {
         "active": active,
         "canary": canary,
@@ -257,7 +265,8 @@ def _rc() -> Optional["_r.Redis"]:
         return None
     try:
         return _r.Redis.from_url(Config.REDIS_URL, decode_responses=True)
-    except Exception:
+    except Exception as e:
+        logger.debug("Failed to connect to Redis for connection helper: %s", e)
         return None
 
 
@@ -268,7 +277,8 @@ def get_active_collection_name() -> str:
     try:
         v = r.get("index:active")
         return v or Config.MILVUS_COLLECTION
-    except Exception:
+    except Exception as e:
+        logger.debug("Failed to get active collection name from Redis: %s", e)
         return Config.MILVUS_COLLECTION
 
 
@@ -280,7 +290,8 @@ def get_canary_collection_name() -> str:
     try:
         v = r.get("index:canary")
         return v or f"{base}_canary"
-    except Exception:
+    except Exception as e:
+        logger.debug("Failed to get canary collection name from Redis: %s", e)
         return f"{base}_canary"
 
 
@@ -296,8 +307,8 @@ def begin_canary_build() -> dict:
         try:
             r.set("index:canary_build_started", str(now))
             r.set("index:canary", canary)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Failed to mark canary build start in Redis: %s", e)
     return {"active": get_active_collection_name(), "canary": canary, "started": now}
 
 
@@ -314,8 +325,8 @@ def promote_canary() -> dict:
             r.set("index:active", canary)
             r.set("index:last_promotion_ts", str(now))
             r.set("index:previous_active", active)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Failed to promote canary in Redis: %s", e)
     return {"active": canary, "previous_active": active, "promoted_at": now}
 
 
@@ -333,8 +344,8 @@ def index_status() -> dict:
             lp = r.get("index:last_promotion_ts")
             st["build_started"] = int(bs) if bs else None
             st["last_promotion_ts"] = int(lp) if lp else None
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Failed to fetch index status from Redis: %s", e)
     # Include readiness of both
     st["active_ready"] = check_milvus_readiness(st["active"]).get("loaded", False)
     st["canary_ready"] = check_milvus_readiness(st["canary"]).get("loaded", False)
@@ -356,6 +367,6 @@ def check_milvus_readiness_secondary(
             col = Collection(name, using="secondary")
             col.load()
             info["loaded"] = True
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Milvus secondary readiness check error: %s", e)
     return info

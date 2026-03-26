@@ -4,6 +4,7 @@ import uuid
 import logging
 import json
 import hashlib
+
 import random
 import jwt
 import redis
@@ -59,6 +60,8 @@ try:
 except Exception:
     ChatBedrock = None  # type: ignore
     BedrockEmbeddings = None  # type: ignore
+
+logger = logging.getLogger(__name__)
 
 # Global variables
 _redis = None
@@ -195,7 +198,7 @@ def _load_output_guardrail_cfg(tenant: str) -> dict:
     """
     cfg: dict = {
         "enable_pii_redaction": True,
-        "enable_secret_redaction": False,
+        "enable_secret_redaction": False,  # nosec B105
         "max_answer_chars": None,
     }
     if not _redis_usable():
@@ -207,8 +210,8 @@ def _load_output_guardrail_cfg(tenant: str) -> dict:
                 user_cfg = json.loads(raw)
                 if isinstance(user_cfg, dict):
                     cfg.update(user_cfg)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Silent exception (pass): %s", e)
     except Exception:
         _record_redis_failure()
     return cfg
@@ -284,8 +287,8 @@ def _acquire_concurrency(tenant: str, max_conc: int) -> bool:
 def _release_concurrency(tenant: str) -> None:
     try:
         TENANT_INFLIGHT.labels(tenant=tenant).dec()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
     if not _redis_usable():
         return
     try:
@@ -342,8 +345,8 @@ def _get_cache_ns() -> int:
                 return int(v)
             _redis.set("cache:ns", 1)
             return 1
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Silent exception (pass): %s", e)
 
 
 # ---- Phase 16: Observability tracing init ----
@@ -362,9 +365,9 @@ def _init_tracing():
             ot_trace.set_tracer_provider(provider)
         global _tracer
         _tracer = ot_trace.get_tracer("rag.app")
-    except Exception:
+    except Exception as e:
         # best-effort init
-        pass
+        logger.debug("Silent exception (pass): %s", e)
 
 
 def _trace_event(name: str, attrs: dict | None = None) -> None:
@@ -372,8 +375,8 @@ def _trace_event(name: str, attrs: dict | None = None) -> None:
         span = ot_trace.get_current_span()
         if span:
             span.add_event(name, attributes=attrs or {})
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
 
 
 def _trace_sampled() -> bool:
@@ -387,7 +390,7 @@ def _trace_sampled() -> bool:
         except Exception:
             _record_redis_failure()
     try:
-        return random.random() < rate
+        return random.random() < rate  # nosec B311
     except Exception:
         return False
 
@@ -449,8 +452,8 @@ def _load_guardrail_cfg(tenant: str) -> dict:
                 user_cfg = json.loads(raw)
                 if isinstance(user_cfg, dict):
                     cfg.update(user_cfg)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Silent exception (pass): %s", e)
     except Exception:
         _record_redis_failure()
     return cfg
@@ -474,7 +477,8 @@ def _guardrails_check_input(text: str, cfg: dict) -> dict:
         for p in pats:
             try:
                 s = str(p).lower()
-            except Exception:
+            except Exception as e:
+                logger.debug("Silent exception (continue): %s", e)
                 continue
             if not s:
                 continue
@@ -580,8 +584,8 @@ def _freshness_update_metrics():
             lag = max(0, now - ts) if ts else 0
             try:
                 SOURCE_FRESHNESS_LAG_SECONDS.labels(source=s).set(lag)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Silent exception (pass): %s", e)
     except Exception:
         _record_redis_failure()
 
@@ -677,10 +681,11 @@ def _load_golden_queries(limit: int) -> list[str]:
                         qs.append(q)
                         if len(qs) >= limit:
                             break
-                except Exception:
+                except Exception as e:
+                    logger.debug("Silent exception (continue): %s", e)
                     continue
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
     return qs
 
 
@@ -701,7 +706,8 @@ def _measure_index(queries: list[str], collection_name: str) -> dict:
                     s = md.get("source", "")
                     if s:
                         srcs.add(s)
-                except Exception:
+                except Exception as e:
+                    logger.debug("Silent exception (continue): %s", e)
                     continue
             per_q_sources.append(srcs)
         except Exception:
@@ -818,7 +824,8 @@ def admin_tenant_batch_summary(request: Request, tenants: list[str]):
         try:
             s = admin_tenant_summary(request, t)
             out.append(s.get("summary"))
-        except Exception:
+        except Exception as e:
+            logger.debug("Silent exception (continue): %s", e)
             continue
     return {"ok": True, "summaries": out}
 
@@ -834,7 +841,8 @@ def admin_tenant_export_summaries(request: Request, tenants: list[str] | None = 
         try:
             s = admin_tenant_summary(request, t).get("summary", {})
             rows.append(s)
-        except Exception:
+        except Exception as e:
+            logger.debug("Silent exception (continue): %s", e)
             continue
     content = "\n".join([json.dumps(r) for r in rows])
     if _redis_usable():
@@ -951,7 +959,8 @@ def admin_eval_drift_status(
     for r in rows:
         try:
             obj = json.loads(r)
-        except Exception:
+        except Exception as e:
+            logger.debug("Silent exception (continue): %s", e)
             continue
         ts = int(obj.get("ts", 0))
         if window and ts and now_ts - ts > int(window):
@@ -1177,7 +1186,8 @@ def admin_query_trail(request: Request, tenant: str, limit: int = 50):
         for r in raw:
             try:
                 out.append(json.loads(r))
-            except Exception:
+            except Exception as e:
+                logger.debug("Silent exception (continue): %s", e)
                 continue
         return {"ok": True, "tenant": tenant, "events": out}
     except HTTPException:
@@ -1231,7 +1241,8 @@ def admin_router_status(request: Request, limit: int = 100):
             for r in raw:
                 try:
                     items.append(json.loads(r))
-                except Exception:
+                except Exception as e:
+                    logger.debug("Silent exception (continue): %s", e)
                     continue
         except Exception:
             _record_redis_failure()
@@ -1453,8 +1464,8 @@ def _router_decide(
             h = _redis.hgetall(f"router:cost:{p}:{m}") or {}
             if "prompt" in h:
                 return float(h.get("prompt"))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Silent exception (pass): %s", e)
         return 999.0
 
     # Candidate list with SLO evaluation
@@ -1467,8 +1478,8 @@ def _router_decide(
             ovp = ov.get("provider")
             if ovp and ovp in allowed:
                 order = [ovp] + [p for p in allowed if p != ovp]
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Silent exception (pass): %s", e)
     cands = []
     for p in order:
         p95 = _p95(p)
@@ -1479,18 +1490,18 @@ def _router_decide(
         if slo_max_p95_ms is not None:
             try:
                 slo_ok = slo_ok and (ms <= float(slo_max_p95_ms))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Silent exception (pass): %s", e)
         if slo_max_err is not None:
             try:
                 slo_ok = slo_ok and (err <= float(slo_max_err))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Silent exception (pass): %s", e)
         if slo_max_cost is not None:
             try:
                 slo_ok = slo_ok and (cost <= float(slo_max_cost))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Silent exception (pass): %s", e)
         cands.append(
             {"provider": p, "p95": p95, "err": err, "cost": cost, "slo_ok": slo_ok}
         )
@@ -1577,8 +1588,8 @@ def _router_decide(
         ROUTER_DECISIONS_TOTAL.labels(
             tenant=tenant, provider=provider, reason=reason
         ).inc()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
     return model, provider, reason
 
 
@@ -1631,10 +1642,10 @@ def admin_cache_invalidate(request: Request, tenant: str = None):
         _bump_cache_ns()
         try:
             CACHE_EVICTIONS_TOTAL.inc()
-        except Exception:
-            pass
-    except Exception:
-        pass
+        except Exception as e:
+            logger.debug("Silent exception (pass): %s", e)
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
     return {"ok": True, "ns": _get_cache_ns()}
 
 
@@ -1701,7 +1712,8 @@ def admin_hitl_queue(request: Request, limit: int = 100):
             for r in raw:
                 try:
                     items.append(json.loads(r))
-                except Exception:
+                except Exception as e:
+                    logger.debug("Silent exception (continue): %s", e)
                     continue
         except Exception:
             _record_redis_failure()
@@ -1715,8 +1727,8 @@ def admin_hitl_resolve(request: Request, resolution: str, item: dict):
     tenant = str(item.get("tenant", "")) or "__default__"
     try:
         HITL_REVIEWED_TOTAL.labels(tenant=tenant, resolution=resv).inc()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
     # Optional: keep a short history of resolutions
     if _redis_usable():
         try:
@@ -1847,8 +1859,8 @@ def _budget_set(tenant: str, limit: float, spent: float, window: int):
             except Exception:
                 _record_redis_failure()
         _budget_mem[tenant] = {"limit": limit, "spent": spent, "window": window}
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
 
 
 # ---- Phase 10: DR admin endpoints ----
@@ -1905,8 +1917,8 @@ def admin_dr_status(request: Request):
         lag = max(0, int(t_primary - t_secondary))
     try:
         DR_REPLICATION_LAG_SECONDS.set(lag)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
     read_pref = "primary"
     if _redis_usable():
         try:
@@ -1922,7 +1934,8 @@ def admin_dr_status(request: Request):
             for r in raw:
                 try:
                     actions.append(json.loads(r))
-                except Exception:
+                except Exception as e:
+                    logger.debug("Silent exception (continue): %s", e)
                     continue
         except Exception:
             _record_redis_failure()
@@ -1945,8 +1958,8 @@ def _budget_add_spend(tenant: str, usd: float):
             window = today
         spent += max(0.0, float(usd))
         _budget_set(tenant, limit, spent, window)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
 
 
 def _budget_should_throttle_and_model(tenant: str) -> tuple[bool, Optional[str]]:
@@ -1969,8 +1982,8 @@ def _bump_cache_ns() -> int:
     if _redis is not None:
         try:
             return int(_redis.incr("cache:ns"))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Silent exception (pass): %s", e)
     _cache_ns_mem += 1
     return _cache_ns_mem
 
@@ -2078,8 +2091,8 @@ def _quota_inc_and_check(key_label: str) -> int:
             if newv == 1:
                 _redis.expire(qkey, 90000)
             return int(newv)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Silent exception (pass): %s", e)
     st = _rate_state.get(f"q:{key_label}")
     if not st or st.get("day") != day:
         st = {"day": day, "count": 0}
@@ -2286,8 +2299,8 @@ if Config.SENTRY_DSN:
     try:
         sentry_sdk.init(dsn=Config.SENTRY_DSN, traces_sample_rate=0.0)
         app.add_middleware(SentryAsgiMiddleware)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
 
 """Optional OpenTelemetry tracing initialization"""
 _tracer = None
@@ -2344,8 +2357,8 @@ async def limit_request_size(request: Request, call_next):
         try:
             if int(cl) > Config.MAX_REQUEST_BYTES:
                 return PlainTextResponse("Request entity too large", status_code=413)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Silent exception (pass): %s", e)
     return await call_next(request)
 
 
@@ -2451,8 +2464,8 @@ if Config.REDIS_URL:
                 )
                 CIRCUIT_OPEN.labels(component="redis").inc()
                 CIRCUIT_STATE.labels(component="redis").set(1)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Silent exception (pass): %s", e)
 
 # Simple in-memory cache structure: key -> {v: response_json, t: epoch}
 _cache = {}
@@ -2627,7 +2640,8 @@ def _load_episode(tenant: str, user: str) -> list[dict]:
         for r in rows:
             try:
                 out.append(json.loads(r))
-            except Exception:
+            except Exception as e:
+                logger.debug("Silent exception (continue): %s", e)
                 continue
     except Exception:
         _record_redis_failure()
@@ -2699,8 +2713,8 @@ def _record_redis_failure():
             _redis_cb_open_until = int(time.time()) + max(1, Config.CB_RESET_SECONDS)
             CIRCUIT_OPEN.labels(component="redis").inc()
             CIRCUIT_STATE.labels(component="redis").set(1)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
 
 
 @app.middleware("http")
@@ -2742,8 +2756,8 @@ async def add_request_id_and_logging(request: Request, call_next):
             REQUEST_DURATION.labels(
                 method=request.method, path=request.url.path
             ).observe((time.time() - start))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Silent exception (pass): %s", e)
 
 
 @app.on_event("startup")
@@ -2775,8 +2789,8 @@ def _startup():
                                 )
                                 CIRCUIT_OPEN.labels(component="milvus").inc()
                                 CIRCUIT_STATE.labels(component="milvus").set(1)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("Silent exception (pass): %s", e)
                         raise
                     time.sleep(delay)
                     delay *= 2
@@ -2814,10 +2828,10 @@ def _startup():
                             }
                         )
                     )
-                except Exception:
-                    pass
-    except Exception:
-        pass
+                except Exception as e:
+                    logger.debug("Silent exception (pass): %s", e)
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
 
 
 @app.post(
@@ -2898,15 +2912,15 @@ def ask(req: AskReq, request: Request):
                         }
                     )
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Silent exception (pass): %s", e)
             raise HTTPException(
                 status_code=400, detail="Query blocked by tenant guardrails"
             )
     except HTTPException:
         raise
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
     # Phase 21: simple arithmetic tool path
     math_val = _maybe_eval_math(q)
     if math_val is not None:
@@ -2951,14 +2965,14 @@ def ask(req: AskReq, request: Request):
     if not _incr_rate(tenant_label, limits.get("rate_per_min", 300)):
         try:
             TENANT_RATE_LIMITED_TOTAL.labels(tenant=tenant_label).inc()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Silent exception (pass): %s", e)
         raise HTTPException(status_code=429, detail="Rate limit exceeded for tenant")
     if not _acquire_concurrency(tenant_label, limits.get("concurrent_max", 8)):
         try:
             TENANT_CONCURRENCY_DROPPED_TOTAL.labels(tenant=tenant_label).inc()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Silent exception (pass): %s", e)
         raise HTTPException(
             status_code=429, detail="Too many concurrent requests for tenant"
         )
@@ -2979,8 +2993,8 @@ def ask(req: AskReq, request: Request):
         fk_eff = fk_max
     try:
         ASK_USAGE_TOTAL.labels(tenant_label).inc()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
     # Budget check and potential model downgrade
     throttle, model_override = _budget_should_throttle_and_model(tenant_label)
     if throttle:
@@ -2994,8 +3008,8 @@ def ask(req: AskReq, request: Request):
             if req.filters is None:
                 req.filters = AskFilters()
             req.filters.tenant = tenant_label
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
     # Phase 11: Policy-aware pre-eval to derive additional filters/deny
     try:
         pol = load_policy(_redis if _redis_usable() else None, tenant_label)
@@ -3018,8 +3032,8 @@ def ask(req: AskReq, request: Request):
                         }
                     )
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Silent exception (pass): %s", e)
             raise HTTPException(status_code=403, detail="Policy denied the request")
         # merge filter hints
         if add_filters:
@@ -3031,20 +3045,20 @@ def ask(req: AskReq, request: Request):
                 req.filters.doc_type = str(add_filters.get("doc_type"))
     except HTTPException:
         raise
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
     # Phase 28: append query trail event (tenant-level) with intent and doc_type
     try:
         dt_for_trail = getattr(req.filters, "doc_type", None) if req.filters else None
         _append_query_trail(tenant_label, q, intent, dt_for_trail)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
     # Phase 27: record query volume per tenant/doc_type for hotspot analytics
     try:
         dt_for_q = getattr(req.filters, "doc_type", None) if req.filters else None
         _track_query_volume(tenant_label, dt_for_q)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
 
     def _get_llm_variant(t: str) -> str:
         # redis hash ab:llm maps tenant->'A'|'B'
@@ -3053,8 +3067,8 @@ def ask(req: AskReq, request: Request):
                 v = _redis.hget("ab:llm", t)
                 if v in ("A", "B"):
                     return v
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Silent exception (pass): %s", e)
         return _ab_llm_mem.get(t) or "A"
 
     def _get_rerank_enabled(t: str) -> bool:
@@ -3063,8 +3077,8 @@ def ask(req: AskReq, request: Request):
                 v = _redis.hget("ab:rerank", t)
                 if v is not None:
                     return str(v).lower() == "true"
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Silent exception (pass): %s", e)
         if t in _ab_rerank_mem:
             return str(_ab_rerank_mem.get(t)).lower() == "true"
         return bool(Config.HYBRID_ENABLED)
@@ -3084,8 +3098,8 @@ def ask(req: AskReq, request: Request):
         model_name, routed_provider, _rreason = _router_decide(
             tenant_label, model_name, doc_type
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
     rerank_enabled = _get_rerank_enabled(tenant_label)
     # Phase 26: multi-index routing – choose collection per tenant/doc_type
     routed_collection = None
@@ -3125,8 +3139,8 @@ def ask(req: AskReq, request: Request):
             if v:
                 try:
                     CACHE_HITS_TOTAL.labels(tenant=tenant_label).inc()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Silent exception (pass): %s", e)
                 _trace_event("cache.hit", {"kind": "coarse", "tenant": tenant_label})
                 obj = json.loads(v)
                 return obj
@@ -3134,7 +3148,10 @@ def ask(req: AskReq, request: Request):
             _record_redis_failure()
     # Phase 9: fire-and-forget shadow online eval with sampling
     try:
-        if _online_eval_enabled() and random.random() < _online_eval_sample_rate():
+        if (
+            _online_eval_enabled()
+            and random.random() < _online_eval_sample_rate()  # nosec B311
+        ):
             run_shadow_eval(
                 tenant_label,
                 q,
@@ -3142,8 +3159,8 @@ def ask(req: AskReq, request: Request):
                 treatment_model=model_name,
                 treatment_rerank=rerank_enabled,
             )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
     # Build or reuse chain for this routing (include collection name in cache key)
     key_rt = (
         model_name,
@@ -3176,8 +3193,8 @@ def ask(req: AskReq, request: Request):
             llm=llm_variant,
             rerank=str(bool(rerank_enabled)).lower(),
         ).inc()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
     # Cache get (if enabled) keyed by query+filters+tenant
     ns = _get_cache_ns()
     if Config.CACHE_ENABLED:
@@ -3285,8 +3302,8 @@ def ask(req: AskReq, request: Request):
             ent2 = _cache.get(ckey)
             if ent2 and (time.time() - ent2.get("t", 0)) < Config.CACHE_TTL_SECONDS:
                 return ent2.get("v", {"answer": "", "sources": []})
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Silent exception (pass): %s", e)
         retry_after = max(1, int(_cb_open_until - now_ts)) if _cb_open_until else 10
         payload = {
             "answer": "Temporarily degraded: insufficient context. Please retry shortly.",
@@ -3314,8 +3331,8 @@ def ask(req: AskReq, request: Request):
             cur.set_attribute(
                 "request.id", getattr(getattr(request, "state", None), "request_id", "")
             )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
     while True:
         try:
             if _tracer is not None:
@@ -3337,8 +3354,8 @@ def ask(req: AskReq, request: Request):
                             PROVIDER_LLM_LATENCY.labels(
                                 provider=routed_provider
                             ).observe(dur)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("Silent exception (pass): %s", e)
                         # record provider success timestamp and latency window
                         if _redis_usable():
                             try:
@@ -3349,8 +3366,8 @@ def ask(req: AskReq, request: Request):
                                 _redis.ltrim(f"prov:lat:{routed_provider}", 0, 199)
                             except Exception:
                                 _record_redis_failure()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("Silent exception (pass): %s", e)
                 except concurrent.futures.TimeoutError:
                     # timeout acts as a failure for CB
                     _cb_failures += 1
@@ -3358,8 +3375,8 @@ def ask(req: AskReq, request: Request):
                         _cb_open_until = time.time() + Config.CB_RESET_SECONDS
                     try:
                         PROVIDER_ERRORS_TOTAL.labels(provider=routed_provider).inc()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("Silent exception (pass): %s", e)
                     # record provider error
                     if _redis_usable():
                         try:
@@ -3376,8 +3393,8 @@ def ask(req: AskReq, request: Request):
             try:
                 if attempt < Config.RETRY_MAX_ATTEMPTS:
                     ASK_RETRIES_TOTAL.inc()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Silent exception (pass): %s", e)
             if attempt < Config.RETRY_MAX_ATTEMPTS:
                 time.sleep(delay)
                 delay *= 2
@@ -3390,8 +3407,8 @@ def ask(req: AskReq, request: Request):
             try:
                 if attempt < Config.RETRY_MAX_ATTEMPTS:
                     ASK_RETRIES_TOTAL.inc()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Silent exception (pass): %s", e)
             # record provider error
             if _redis_usable():
                 try:
@@ -3423,8 +3440,8 @@ def ask(req: AskReq, request: Request):
                 raise HTTPException(status_code=403, detail="Policy denied the answer")
         except HTTPException:
             raise
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Silent exception (pass): %s", e)
         # record episode context
         try:
             _append_episode(
@@ -3433,8 +3450,8 @@ def ask(req: AskReq, request: Request):
                 q,
                 result.get("result") or result.get("answer") or "",
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Silent exception (pass): %s", e)
 
     docs = result.get("source_documents", []) if result else []
     try:
@@ -3461,10 +3478,10 @@ def ask(req: AskReq, request: Request):
             docs = [d for d in docs if d.metadata.get("source") not in deny]
         try:
             DENYLIST_SIZE.set(len(deny))
-        except Exception:
-            pass
-    except Exception:
-        pass
+        except Exception as e:
+            logger.debug("Silent exception (pass): %s", e)
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
     # Apply simple metadata filters
     if req.filters:
         try:
@@ -3502,8 +3519,8 @@ def ask(req: AskReq, request: Request):
                         return False
 
                 docs = [d for d in docs if _in_range(str(d.metadata.get("date", "")))]
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Silent exception (pass): %s", e)
     # Reranking: ML model if configured, else TF-based if enabled
     # Determine rerank model variant (A/B) per-tenant if configured
     rerank_model_name = Config.RERANK_MODEL
@@ -3549,9 +3566,9 @@ def ask(req: AskReq, request: Request):
                 pairs = list(zip(scores, docs))
                 pairs.sort(key=lambda x: x[0], reverse=True)
                 docs = [d for _, d in pairs]
-        except Exception:
+        except Exception as e:
             # fall back silently
-            pass
+            logger.debug("Silent exception (pass): %s", e)
     elif Config.RERANK_ENABLED:
         q_terms = [t for t in q.lower().split() if t]
 
@@ -3563,8 +3580,8 @@ def ask(req: AskReq, request: Request):
             docs = sorted(
                 docs[: max(1, Config.RERANK_MAX_DOCS)], key=_score, reverse=True
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Silent exception (pass): %s", e)
     sources = [
         {
             "source": d.metadata.get("source", ""),
@@ -3615,8 +3632,8 @@ def ask(req: AskReq, request: Request):
                 )
     except HTTPException:
         raise
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
     # Phase 14: semantic cache write (fine key includes sources simhash)
     if _redis_usable() and Config.SEMANTIC_CACHE_ENABLED:
         try:
@@ -3665,8 +3682,8 @@ def ask(req: AskReq, request: Request):
                     if len(b) >= 2:
                         margin = max(0.0, float(b[0][0] - b[1][0]))
                         conf += min(margin, 0.5) * 0.4
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Silent exception (pass): %s", e)
             # rerank presence
             if rerank_enabled:
                 conf += 0.2
@@ -3677,7 +3694,7 @@ def ask(req: AskReq, request: Request):
     try:
         cval = _compute_confidence()
         HITL_CONFIDENCE.observe(cval)
-        should_sample = random.random() < max(
+        should_sample = random.random() < max(  # nosec B311
             0.0, min(1.0, float(Config.HITL_SAMPLE_RATE))
         )
         if Config.HITL_ENABLED and (
@@ -3711,8 +3728,8 @@ def ask(req: AskReq, request: Request):
                     ).inc()
                 except Exception:
                     _record_redis_failure()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
     # Explainability: include previews and scores if enabled
     if Config.EXPLAIN_ENABLED:
         try:
@@ -3750,8 +3767,8 @@ def ask(req: AskReq, request: Request):
                     )
                 explain.append(item)
             resp["explain"] = explain
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Silent exception (pass): %s", e)
     # Export payload (markdown or json) with citations
     if Config.EXPORT_ENABLED:
         try:
@@ -3777,8 +3794,8 @@ def ask(req: AskReq, request: Request):
                         ],
                     },
                 }
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Silent exception (pass): %s", e)
     # Cost and token estimation metrics
     if Config.COST_ENABLED:
         try:
@@ -3792,8 +3809,8 @@ def ask(req: AskReq, request: Request):
                 c_tokens / 1000.0
             ) * Config.COST_PER_1K_COMPLETION_TOKENS
             COST_USD_TOTAL.labels(tenant=tenant).inc(cost)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Silent exception (pass): %s", e)
     # Cache set
     if Config.CACHE_ENABLED:
         try:
@@ -3856,8 +3873,8 @@ def ask(req: AskReq, request: Request):
                     _audit_mem.append(audit)
             else:
                 _audit_mem.append(audit)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
     # Update budget with cost (if computed)
     try:
         if Config.BUDGET_ENABLED and Config.COST_ENABLED:
@@ -3870,16 +3887,16 @@ def ask(req: AskReq, request: Request):
                     c_tokens / 1000.0
                 ) * Config.COST_PER_1K_COMPLETION_TOKENS
             _budget_add_spend(tenant_label, float(cost))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
     try:
         return resp
     finally:
         if span_ctx is not None:
             try:
                 span_ctx.__exit__(None, None, None)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Silent exception (pass): %s", e)
 
 
 @app.post(
@@ -3893,8 +3910,8 @@ def submit_feedback(req: FeedbackReq, request: Request):
     try:
         helpful = bool(req.helpful)
         FEEDBACK_TOTAL.labels(tenant=tenant, helpful=str(helpful).lower()).inc()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
     fb = {
         "tenant": tenant,
         "helpful": bool(req.helpful),
@@ -3984,8 +4001,8 @@ def admin_eval_run(request: Request):
                 _eval_mem.append(res)
         else:
             _eval_mem.append(res)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
     return res
 
 
@@ -4034,7 +4051,8 @@ def admin_canary_rerank(request: Request, tenant: str):
                             items.append(obj)
                             if len(items) >= window:
                                 break
-                    except Exception:
+                    except Exception as e:
+                        logger.debug("Silent exception (continue): %s", e)
                         continue
             except Exception:
                 _record_redis_failure()
@@ -4111,7 +4129,8 @@ def admin_feedback_summary(request: Request, tenant: str, limit: int = 500):
                     if obj.get("tenant") != t:
                         continue
                     items.append(obj)
-                except Exception:
+                except Exception as e:
+                    logger.debug("Silent exception (continue): %s", e)
                     continue
         except Exception:
             _record_redis_failure()
@@ -4154,7 +4173,8 @@ def admin_feedback_summary(request: Request, tenant: str, limit: int = 500):
                 if not s:
                     continue
                 tags[s] = tags.get(s, 0) + 1
-        except Exception:
+        except Exception as e:
+            logger.debug("Silent exception (continue): %s", e)
             continue
     helpful_rate = helpful_cnt / float(total) if total else None
     halluc_rate = halluc_cnt / float(total) if total else None
@@ -4208,7 +4228,8 @@ def admin_tuning_suggestions(
                     if obj.get("tenant") != t:
                         continue
                     items.append(obj)
-                except Exception:
+                except Exception as e:
+                    logger.debug("Silent exception (continue): %s", e)
                     continue
         except Exception:
             _record_redis_failure()
@@ -4253,7 +4274,8 @@ def admin_tuning_suggestions(
             for r in raw_trail:
                 try:
                     obj = json.loads(r)
-                except Exception:
+                except Exception as e:
+                    logger.debug("Silent exception (continue): %s", e)
                     continue
                 inten = (obj.get("intent") or "").strip().lower()
                 if not inten:
@@ -4528,10 +4550,10 @@ def ask_stream(query: str, request: Request):
                     docs = [d for d in docs if d.metadata.get("source") not in deny]
                 try:
                     DENYLIST_SIZE.set(len(deny))
-                except Exception:
-                    pass
-            except Exception:
-                pass
+                except Exception as e:
+                    logger.debug("Silent exception (pass): %s", e)
+            except Exception as e:
+                logger.debug("Silent exception (pass): %s", e)
             # first send sources metadata
             srcs = []
             for d in docs:
@@ -4557,8 +4579,8 @@ def ask_stream(query: str, request: Request):
                             }
                         )
                     yield f"event: explain\ndata: {json.dumps(previews)}\n\n"
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Silent exception (pass): %s", e)
             # Update source index (for retention) with any observed date
             try:
                 for d in docs:
@@ -4576,10 +4598,11 @@ def ask_stream(query: str, request: Request):
                                 _source_index_mem[src] = score
                         else:
                             _source_index_mem[src] = score
-                    except Exception:
+                    except Exception as e:
+                        logger.debug("Silent exception (continue): %s", e)
                         continue
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Silent exception (pass): %s", e)
             # stream answer in small chunks (with PII redaction if enabled)
             safe_full = _redact_pii(full)
             chunk = []
@@ -4606,8 +4629,8 @@ def ask_stream(query: str, request: Request):
                         c_tokens / 1000.0
                     ) * Config.COST_PER_1K_COMPLETION_TOKENS
                     COST_USD_TOTAL.labels(tenant=tenant).inc(cost)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Silent exception (pass): %s", e)
         except Exception as e:
             yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
 
@@ -4657,8 +4680,8 @@ def admin_delete(req: AdminSoftDeleteReq, request: Request):
         else:
             cur = set(_deny_sources_mem)
         DENYLIST_SIZE.set(len(cur))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
     return {"status": "ok", "source": src}
 
 
@@ -4679,8 +4702,8 @@ def admin_undelete(req: AdminSoftDeleteReq, request: Request):
     if not ok or _redis is None:
         try:
             _deny_sources_mem.discard(src)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Silent exception (pass): %s", e)
     DOCS_SOFT_UNDELETES_TOTAL.inc()
     _bump_cache_ns()
     try:
@@ -4693,8 +4716,8 @@ def admin_undelete(req: AdminSoftDeleteReq, request: Request):
         else:
             cur = set(_deny_sources_mem)
         DENYLIST_SIZE.set(len(cur))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
     return {"status": "ok", "source": src}
 
 
@@ -4790,7 +4813,8 @@ def retention_sweep(request: Request):
             else:
                 _deny_sources_mem.add(src)
             deleted += 1
-        except Exception:
+        except Exception as e:
+            logger.debug("Silent exception (continue): %s", e)
             continue
     DOCS_RETENTION_SWEEPS_TOTAL.inc()
     if deleted:
@@ -4806,8 +4830,8 @@ def retention_sweep(request: Request):
         else:
             cur = set(_deny_sources_mem)
         DENYLIST_SIZE.set(len(cur))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
     return {"status": "ok", "deleted": deleted, "cutoff_ts": cutoff_ts}
 
 
@@ -4817,8 +4841,8 @@ def system_state():
     open_state = 1 if (_cb_open_until and now_ts < _cb_open_until) else 0
     try:
         CIRCUIT_STATE.labels(component="llm").set(open_state)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
     # also set denylist gauge on system read
     try:
         cur = set()
@@ -4830,8 +4854,8 @@ def system_state():
         else:
             cur = set(_deny_sources_mem)
         DENYLIST_SIZE.set(len(cur))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
     return {
         "circuit": {
             "component": "llm",

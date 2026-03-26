@@ -1,3 +1,4 @@
+import logging
 import os
 from langchain_community.vectorstores import FAISS
 from langchain_community.vectorstores import Milvus as LC_Milvus
@@ -20,6 +21,8 @@ import redis as _redis_mod
 import time
 from typing import List, Dict, Any
 from src.retrieval.hybrid_v2 import BM25Adapter, blend_candidates
+
+logger = logging.getLogger(__name__)
 
 
 # Prometheus histogram for vector search latency
@@ -249,8 +252,8 @@ def _emb_provider_for_doc(doc_type: str | None) -> tuple[str, str]:
             model = (
                 Config.EMBED_MODEL_SMALL if sel == "small" else Config.EMBED_MODEL_LARGE
             )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
     # Redis overrides per doc_type
     try:
         if Config.REDIS_URL:
@@ -262,8 +265,8 @@ def _emb_provider_for_doc(doc_type: str | None) -> tuple[str, str]:
                     provider = pv
                 if mv:
                     model = mv
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
     return provider, model
 
 
@@ -332,8 +335,8 @@ def build_chain(
                         v = (r.get("dr:read_preferred") or pref).lower()
                         if v in ("primary", "secondary"):
                             pref = v
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Silent exception (pass): %s", e)
                 if pref == "secondary":
                     host = Config.MILVUS_HOST_SECONDARY
                     port = str(Config.MILVUS_PORT_SECONDARY)
@@ -368,8 +371,8 @@ def build_chain(
         try:
             if Config.MILVUS_PARTITIONED and getattr(filters, "tenant", None):
                 search_kwargs["partition_names"] = [str(filters.tenant)]
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Silent exception (pass): %s", e)
     else:
         pred = _faiss_filter_callable_from_filters(filters)
         if pred:
@@ -438,8 +441,8 @@ def build_chain(
                                     weights["dense"] = float(rd["dense"])
                                 if "bm25" in rd:
                                     weights["bm25"] = float(rd["bm25"])
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("Silent exception (pass): %s", e)
                         blended = blend_candidates(
                             dense, bm25, weights=weights, k=Config.RETRIEVER_K
                         )
@@ -493,6 +496,6 @@ def build_chain(
     )
     try:
         setattr(qa, "_retriever_ref", retriever)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Silent exception (pass): %s", e)
     return qa

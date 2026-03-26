@@ -2,13 +2,17 @@ import argparse
 import os
 import uuid
 import time
+import logging
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+
 from langchain_openai import OpenAIEmbeddings
 from src.index.faiss_index import build_faiss
 from src.index.milvus_index import insert_rows
 from src.config import Config
 from prometheus_client import Counter, Histogram, pushadd_to_gateway, REGISTRY
+
+logger = logging.getLogger(__name__)
 
 EMBED_BATCHES_TOTAL = Counter(
     "embed_batches_total",
@@ -67,11 +71,18 @@ def to_milvus_rows(chunks, embeddings):
             try:
                 part = embeddings.embed_documents(t_batch)
                 break
-            except Exception:
+            except Exception as e:
                 attempt += 1
                 if attempt >= max(1, Config.RETRY_MAX_ATTEMPTS):
+                    logger.error("Embedding failed after max retries: %s", e)
                     raise
                 INGEST_RETRIES.labels("embed").inc()
+                logger.debug(
+                    "Embedding attempt %d failed: %s. Retrying in %.3fs...",
+                    attempt,
+                    e,
+                    delay,
+                )
                 time.sleep(delay)
                 delay *= 2
         EMBED_BATCH_DURATION.observe(time.time() - start)
@@ -92,8 +103,8 @@ def _parse_model_map(map_str: str):
         for p in [x.strip() for x in (map_str or "").split(",") if x.strip()]:
             k, v = p.split(":", 1)
             mp[k.strip()] = v.strip().lower()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Failed to parse model map '%s': %s", map_str, e)
     return mp
 
 
@@ -129,11 +140,18 @@ def main(input_dir: str, batch_size: int):
                 )
                 insert_rows(rows, partition=part)
                 break
-            except Exception:
+            except Exception as e:
                 ins_attempt += 1
                 if ins_attempt >= max(1, Config.RETRY_MAX_ATTEMPTS):
+                    logger.error("Milvus insertion failed after max retries: %s", e)
                     raise
                 INGEST_RETRIES.labels("insert").inc()
+                logger.debug(
+                    "Milvus insertion attempt %d failed: %s. Retrying in %.3fs...",
+                    ins_attempt,
+                    e,
+                    ins_delay,
+                )
                 time.sleep(ins_delay)
                 ins_delay *= 2
         # metrics: increment counter and optionally push to Pushgateway
@@ -143,8 +161,8 @@ def main(input_dir: str, batch_size: int):
                 pushadd_to_gateway(
                     Config.PUSHGATEWAY_URL, job="ingest", registry=REGISTRY
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to push to Pushgateway: %s", e)
         print(f"[ingest] inserted {i + len(batch)}/{len(chunks)}")
 
 
