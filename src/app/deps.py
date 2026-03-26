@@ -115,8 +115,8 @@ class HybridRetriever:
                     if dmax == dmin:
                         v_sim = 1.0
                     else:
-                        # Normalize distance to similarity in [0,1]
-                        v_sim = (dmax - dist) / (dmax - dmin)
+                        # Normalize distance to similarity in [0,1] with a floor to avoid over-sensitivity
+                        v_sim = (dmax - dist) / max(dmax - dmin, 0.3)
                     tf = self._tf_score(query, getattr(doc, "page_content", ""))
                     sims.append((doc, v_sim, tf))
                 # Normalize tf

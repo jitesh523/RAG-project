@@ -1988,7 +1988,7 @@ def _bump_cache_ns() -> int:
     return _cache_ns_mem
 
 
-def require_auth(request: Request) -> None:
+def require_auth(request: Request, status_code: int = 401) -> None:
     if not Config.API_KEY:
         return
     api_key = request.headers.get("x-api-key")
@@ -1997,7 +1997,7 @@ def require_auth(request: Request) -> None:
     authz = request.headers.get("authorization", "")
     if authz.lower().startswith("bearer ") and _verify_jwt(authz.split(" ", 1)[1]):
         return
-    raise HTTPException(status_code=403, detail="Invalid or missing API key/JWT")
+    raise HTTPException(status_code=status_code, detail="Invalid or missing API key/JWT")
 
 
 def _get_or_create_metric(cls, name, documentation, labelnames=()):
@@ -2369,7 +2369,7 @@ else:
 
     @app.get("/metrics")
     def metrics(request: Request):
-        require_auth(request)
+        require_auth(request, status_code=403)
         return handle_metrics(request)
 
 
@@ -3282,7 +3282,7 @@ def ask(req: AskReq, request: Request):
                 filt = req.filters.dict() if req.filters else {}
             except Exception:
                 filt = {}
-            ckey = f"ask:{ns}:{tenant_label}:{q}:{json.dumps(filt, sort_keys=True)}"
+            ckey = f"ask:{ns}:{tenant_label}:{q}:{json.dumps(filt, sort_keys=True)}:{int(k_eff)}:{int(fk_eff)}"
             skey = f"sem:{ns}:{tenant_label}:{_simhash(q, req.filters)}"
             # Prefer semantic cache, then response cache
             if _redis_usable():
@@ -3818,7 +3818,7 @@ def ask(req: AskReq, request: Request):
         except Exception:
             filt = {}
         ns = _get_cache_ns()
-        ckey = f"ask:{ns}:{tenant_label}:{q}:{json.dumps(filt, sort_keys=True)}"
+        ckey = f"ask:{ns}:{tenant_label}:{q}:{json.dumps(filt, sort_keys=True)}:{int(k_eff)}:{int(fk_eff)}"
         nkey = f"{ckey}:neg"
         if _redis_usable():
             try:
