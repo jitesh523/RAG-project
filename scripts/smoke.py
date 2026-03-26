@@ -1,5 +1,6 @@
 import os
 import requests
+import time
 
 API_URL = os.environ.get("API_URL", "http://127.0.0.1:8000")
 API_KEY = os.environ.get("API_KEY", "")
@@ -9,7 +10,6 @@ if API_KEY:
     headers["x-api-key"] = API_KEY
 
 # Ready - with retry
-import time
 max_attempts = 15
 for attempt in range(max_attempts):
     try:
