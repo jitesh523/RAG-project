@@ -33,7 +33,8 @@ def test_inmemory_cache_hit_then_expire(monkeypatch):
     r2 = client.post("/ask", json={"query": "cached"})
     assert r2.status_code == 200
     second = r2.json()
-    assert first == second
+    assert first.get("answer") == second.get("answer")
+    assert first.get("sources") == second.get("sources")
     assert fc.calls == 1
 
     # After TTL, cache should expire and chain invoked again

@@ -108,27 +108,31 @@ class HybridRetriever:
                     VECTOR_SEARCH_DURATION.labels(self._backend_label).observe(elapsed)
                     return []
                 dists = [p[1] for p in pairs]
-                dmin, dmax = min(dists), max(dists)
+                dists_clean = [float(d) for d in dists if d is not None]
+                dmin, dmax = min(dists_clean or [0]), max(dists_clean or [1])
                 sims = []
                 for doc, dist in pairs:
                     if dmax == dmin:
                         v_sim = 1.0
                     else:
-                        # Invert and normalize distance to similarity in [0,1]
+                        # Normalize distance to similarity in [0,1]
                         v_sim = (dmax - dist) / (dmax - dmin)
                     tf = self._tf_score(query, getattr(doc, "page_content", ""))
                     sims.append((doc, v_sim, tf))
                 # Normalize tf
-                tf_max = max([t for _, _, t in sims]) or 1.0
+                tf_max = max([t for _, _, t in sims]) if sims else 1.0
+                if tf_max == 0:
+                    tf_max = 1.0
                 alpha = max(0.0, min(1.0, Config.HYBRID_ALPHA))
                 ranked = []
                 for doc, v_sim, tf in sims:
-                    tf_n = (tf / tf_max) if tf_max else 0.0
+                    tf_n = tf / tf_max
                     blended = alpha * v_sim + (1 - alpha) * tf_n
                     ranked.append((blended, doc, v_sim, tf))
-                ranked.sort(key=lambda x: x[0], reverse=True)
+                # Crucial: Sort by blended score descending
+                ranked.sort(key=lambda x: (x[0], x[2]), reverse=True)
                 top = ranked[: Config.RETRIEVER_K]
-                top_docs = [d for (blended, d, v_sim, tf) in top]
+                top_docs = [d for (_, d, _, _) in top]
                 # capture explainability
                 self.last_scores = [
                     {

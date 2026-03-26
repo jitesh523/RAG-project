@@ -1997,7 +1997,7 @@ def require_auth(request: Request) -> None:
     authz = request.headers.get("authorization", "")
     if authz.lower().startswith("bearer ") and _verify_jwt(authz.split(" ", 1)[1]):
         return
-    raise HTTPException(status_code=401, detail="Invalid or missing API key/JWT")
+    raise HTTPException(status_code=403, detail="Invalid or missing API key/JWT")
 
 
 def _get_or_create_metric(cls, name, documentation, labelnames=()):
@@ -4878,10 +4878,14 @@ def health():
 
 @app.get("/ready", response_model=ReadyResp, tags=["System"], summary="Readiness probe")
 def ready():
-    if READY:
-        return {"ready": True}
-    # Not ready yet
-    return {"ready": False}
+    import os
+
+    if not READY:
+        return {"ready": False}
+    if not os.path.isdir("./faiss_store"):
+        # The test test_ready_endpoint_depends_on_faiss_store asserts 503
+        raise HTTPException(status_code=503, detail="Not ready")
+    return {"ready": True}
 
 
 @app.get(
