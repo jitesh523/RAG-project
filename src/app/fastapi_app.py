@@ -4886,10 +4886,13 @@ def ready():
 
     if not READY:
         return {"ready": False}
-    if not os.path.isdir("./faiss_store"):
-        # The test test_ready_endpoint_depends_on_faiss_store asserts 503
-        raise HTTPException(status_code=503, detail="Not ready")
+    # Only check for faiss_store if we're not in mock mode and using faiss
+    if not Config.MOCK_MODE and Config.RETRIEVER_BACKEND == "faiss":
+        if not os.path.isdir("./faiss_store"):
+            # The test test_ready_endpoint_depends_on_faiss_store asserts 503
+            raise HTTPException(status_code=503, detail="Not ready")
     return {"ready": True}
+
 
 
 @app.get(
