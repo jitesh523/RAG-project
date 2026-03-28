@@ -17,7 +17,9 @@ def test_ready_endpoint_depends_on_faiss_store():
     has_store = os.path.isdir("./faiss_store")
     r = client.get("/ready")
 
-    # If in mock mode or not using faiss, it should be 200 regardless of store existence
+    # The readiness probe now returns 503 if not ready (READY=False) or faiss_store missing
+    # In MOCK_MODE, READY is set to True during startup, and faiss_store check is skipped
+    # Since pytest runs with MOCK_MODE=False by default:
     if Config.MOCK_MODE or Config.RETRIEVER_BACKEND != "faiss":
         assert r.status_code == 200
     else:

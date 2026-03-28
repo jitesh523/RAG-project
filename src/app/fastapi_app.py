@@ -4885,7 +4885,8 @@ def ready():
     import os
 
     if not READY:
-        return {"ready": False}
+        # Returning 503 instead of 200 ensures health-check tools wait correctly
+        raise HTTPException(status_code=503, detail="Not ready")
     # Only check for faiss_store if we're not in mock mode and using faiss
     if not Config.MOCK_MODE and Config.RETRIEVER_BACKEND == "faiss":
         if not os.path.isdir("./faiss_store"):
