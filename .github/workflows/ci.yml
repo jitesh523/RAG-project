@@ -30,7 +30,9 @@ jobs:
           MOCK_MODE: "true"
           API_KEY: "TESTKEY"
           PORT: "8000"
+          RATE_LIMIT_PER_MIN: "10000"
         run: |
+
           nohup python -m uvicorn src.app.fastapi_app:app --host 127.0.0.1 --port 8000 &
           for i in {1..30}; do
             curl -sf http://127.0.0.1:8000/ready && break || sleep 1;
