@@ -3,6 +3,7 @@ import time
 import hashlib
 import redis
 import logging
+import signal
 from typing import Dict
 
 from src.config import Config
@@ -78,7 +79,19 @@ def _select_embed_model(doc_type: str) -> str:
     return Config.EMBED_MODEL_SMALL if which == "small" else Config.EMBED_MODEL_LARGE
 
 
+RUNNING = True
+
+
+def handle_sigterm(sig, frame):
+    global RUNNING
+    logger.info("Signal received, stopping worker...")
+    RUNNING = False
+
+
 def run_worker():
+    global RUNNING
+    signal.signal(signal.SIGTERM, handle_sigterm)
+    signal.signal(signal.SIGINT, handle_sigterm)
     r = _redis()
     stream = Config.INGEST_STREAM
     group = Config.INGEST_GROUP
@@ -87,17 +100,18 @@ def run_worker():
     embed_clients = {}
     seen_key = "ingest:seen"
     dlq = Config.INGEST_DLQ_STREAM
-    while True:
+    while RUNNING:
         try:
             msgs = r.xreadgroup(
                 group,
                 consumer,
                 streams={stream: ">"},
                 count=Config.INGEST_CONCURRENCY,
-                block=5000,
+                block=2000,  # Smaller block to check RUNNING flag more frequently
             )
             if not msgs:
                 continue
+
             for sname, entries in msgs:
                 for msg_id, fields in entries:
                     start = time.time()
