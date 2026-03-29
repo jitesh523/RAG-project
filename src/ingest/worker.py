@@ -5,6 +5,7 @@ import redis
 import logging
 import signal
 from typing import Dict
+from pydantic import BaseModel, Field, validator
 
 from src.config import Config
 from src.index.milvus_index import insert_rows
@@ -40,25 +41,26 @@ def _ensure_group(r: redis.Redis, stream: str, group: str):
         raise
 
 
-def _parse_fields(fields: Dict[str, str]):
-    text = fields.get("text", "")
-    source = fields.get("source", "")
-    page = int(fields.get("page", "-1"))
-    doc_type = fields.get("doc_type", "")
-    date = fields.get("date", "")
-    # derive id if not present
-    mid = (
-        fields.get("id")
-        or hashlib.sha1((text or "").encode("utf-8"), usedforsecurity=False).hexdigest()
-    )
-    return {
-        "id": mid,
-        "text": text,
-        "source": source,
-        "page": page,
-        "doc_type": doc_type,
-        "date": date,
-    }
+class IngestData(BaseModel):
+    id: str = Field(default_factory=lambda: "")
+    text: str = Field(..., min_length=1)
+    source: str = Field(default="")
+    page: int = Field(default=-1)
+    doc_type: str = Field(default="")
+    date: str = Field(default="")
+
+    @validator("id", pre=True, always=True)
+    def set_id(cls, v, values):
+        if not v:
+            text = values.get("text", "")
+            return hashlib.sha1(
+                (text or "").encode("utf-8"), usedforsecurity=False
+            ).hexdigest()
+        return v
+
+
+def _parse_fields(fields: Dict[str, str]) -> IngestData:
+    return IngestData(**fields)
 
 
 def _parse_model_map(map_str: str):
@@ -116,18 +118,21 @@ def run_worker():
                 for msg_id, fields in entries:
                     start = time.time()
                     try:
+                        # Validate and parse with Pydantic
+                        # If validation fails, it raises ValidationError which is caught by the except block
                         data = _parse_fields(fields)
+
                         # idempotency: skip if already processed
-                        if r.sismember(seen_key, data["id"]):
+                        if r.sismember(seen_key, data.id):
                             r.xack(stream, group, msg_id)
                             continue
                         # embed with per-doc_type model
-                        model_name = _select_embed_model(data.get("doc_type", ""))
+                        model_name = _select_embed_model(data.doc_type)
                         if model_name not in embed_clients:
                             embed_clients[model_name] = OpenAIEmbeddings(
                                 model=model_name, api_key=Config.OPENAI_API_KEY
                             )
-                        emb = embed_clients[model_name].embed_query(data["text"])
+                        emb = embed_clients[model_name].embed_query(data.text)
                         part = (
                             Config.INGEST_TENANT
                             if Config.MILVUS_PARTITIONED and Config.INGEST_TENANT
@@ -136,11 +141,11 @@ def run_worker():
                         insert_rows(
                             [
                                 (
-                                    data["id"][:32],
+                                    data.id[:32],
                                     emb,
-                                    data["text"][:65000],
-                                    data["source"],
-                                    data["page"],
+                                    data.text[:65000],
+                                    data.source,
+                                    data.page,
                                 )
                             ],
                             partition=part,
@@ -148,16 +153,14 @@ def run_worker():
                         # update filter metadata per tenant (Redis-first)
                         try:
                             tenant = Config.INGEST_TENANT or "__default__"
-                            r.sadd(
-                                f"filt:{tenant}:sources", str(data.get("source", ""))
-                            )
-                            if data.get("doc_type"):
+                            r.sadd(f"filt:{tenant}:sources", str(data.source))
+                            if data.doc_type:
                                 r.sadd(
                                     f"filt:{tenant}:doc_types",
-                                    str(data.get("doc_type")),
+                                    str(data.doc_type),
                                 )
-                            if data.get("date"):
-                                d = str(data.get("date"))[:10]
+                            if data.date:
+                                d = str(data.date)[:10]
                                 kmin = f"filt:{tenant}:date_min"
                                 kmax = f"filt:{tenant}:date_max"
                                 cur_min = r.get(kmin)
@@ -170,7 +173,7 @@ def run_worker():
                             logger.debug(
                                 "Failed to update filter metadata in Redis: %s", e
                             )
-                        r.sadd(seen_key, data["id"])
+                        r.sadd(seen_key, data.id)
                         r.xack(stream, group, msg_id)
                         INGEST_WORKER_PROCESSED.inc()
                     except Exception as e:
