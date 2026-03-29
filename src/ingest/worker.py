@@ -26,6 +26,10 @@ INGEST_WORKER_FAILED = Counter(
 INGEST_WORKER_HANDLE = Histogram(
     "ingest_worker_handle_seconds", "Per-message handling time"
 )
+INGEST_EMBED_DURATION = Histogram("ingest_embed_seconds", "Time spent embedding text")
+INGEST_INSERT_DURATION = Histogram(
+    "ingest_insert_seconds", "Time spent inserting into vector db"
+)
 
 
 def _redis() -> redis.Redis:
@@ -132,24 +136,30 @@ def run_worker():
                             embed_clients[model_name] = OpenAIEmbeddings(
                                 model=model_name, api_key=Config.OPENAI_API_KEY
                             )
-                        emb = embed_clients[model_name].embed_query(data.text)
+
+                        with INGEST_EMBED_DURATION.time():
+                            emb = embed_clients[model_name].embed_query(data.text)
+
                         part = (
                             Config.INGEST_TENANT
                             if Config.MILVUS_PARTITIONED and Config.INGEST_TENANT
                             else None
                         )
-                        insert_rows(
-                            [
-                                (
-                                    data.id[:32],
-                                    emb,
-                                    data.text[:65000],
-                                    data.source,
-                                    data.page,
-                                )
-                            ],
-                            partition=part,
-                        )
+
+                        with INGEST_INSERT_DURATION.time():
+                            insert_rows(
+                                [
+                                    (
+                                        data.id[:32],
+                                        emb,
+                                        data.text[:65000],
+                                        data.source,
+                                        data.page,
+                                    )
+                                ],
+                                partition=part,
+                            )
+
                         # update filter metadata per tenant (Redis-first)
                         try:
                             tenant = Config.INGEST_TENANT or "__default__"
