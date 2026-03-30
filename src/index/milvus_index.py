@@ -30,24 +30,41 @@ DR_DUAL_WRITE_ERRORS_TOTAL = Counter(
 )
 
 
+_PRIMARY_CONNECTED = False
+_SECONDARY_CONNECTED = False
+
+
 def connect():
-    connections.connect(
-        alias="default", host=Config.MILVUS_HOST, port=str(Config.MILVUS_PORT)
-    )
+    global _PRIMARY_CONNECTED
+    if _PRIMARY_CONNECTED:
+        return
+    try:
+        connections.connect(
+            alias="default", host=Config.MILVUS_HOST, port=str(Config.MILVUS_PORT)
+        )
+        _PRIMARY_CONNECTED = True
+    except Exception as e:
+        logger.warning("Primary Milvus connection failed: %s", e)
+        _PRIMARY_CONNECTED = False
 
 
 def connect_secondary():
+    global _SECONDARY_CONNECTED
     if not Config.MILVUS_HOST_SECONDARY:
         return False
+    if _SECONDARY_CONNECTED:
+        return True
     try:
         connections.connect(
             alias="secondary",
             host=Config.MILVUS_HOST_SECONDARY,
             port=str(Config.MILVUS_PORT_SECONDARY),
         )
+        _SECONDARY_CONNECTED = True
         return True
     except Exception as e:
         logger.debug("Secondary Milvus connection failed: %s", e)
+        _SECONDARY_CONNECTED = False
         return False
 
 
