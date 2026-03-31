@@ -1,11 +1,12 @@
 import argparse
 import os
-import hashlib
+import redis
+from datetime import datetime
+from pydantic import ValidationError
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from src.config import Config
-import redis
-from datetime import datetime
+from src.ingest.models import IngestData
 
 
 def _load_file(path: str):
@@ -56,8 +57,7 @@ def chunk_docs(docs):
     return splitter.split_documents(docs)
 
 
-from src.ingest.models import IngestData
-from pydantic import ValidationError
+
 
 def enqueue(chunks):
     r = redis.Redis.from_url(Config.REDIS_URL, decode_responses=True)

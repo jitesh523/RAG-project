@@ -3,7 +3,7 @@ import time
 import logging
 import signal
 import redis
-from typing import Dict, List
+from typing import Dict
 from pydantic import ValidationError
 
 from src.config import Config

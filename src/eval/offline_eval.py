@@ -1,38 +1,69 @@
-import concurrent.futures
+import logging
+import json
+import time
+from types import SimpleNamespace
+from typing import Dict, Any, List
+from prometheus_client import Gauge, Counter, pushadd_to_gateway, REGISTRY
+import hashlib
+from src.config import Config
+from src.app.deps import build_chain
 
-def _process_item(item: Dict[str, Any]) -> Dict[str, Any]:
-    t = str(item.get("tenant", "")).strip() or "__default__"
-    q = str(item.get("query", ""))
-    exp_sources = list(item.get("expected_sources", []) or [])
-    exp_ans_parts = list(item.get("expected_answer_contains", []) or [])
-    exp_dtype = str(item.get("expected_doc_type", "")).strip()
+logger = logging.getLogger(__name__)
+
+# Offline evaluation over a golden set
+# Golden JSONL schema per line: {"tenant": "t1", "query": "...", "expected_sources": ["foo.pdf"], "expected_answer_contains": ["term1", "term2"]}
+
+
+def _load_golden(path: str) -> List[Dict[str, Any]]:
+    items = []
     try:
-        chain = build_chain(filters=_make_filters(t))
-        # This is a network/LLM bound operation, so threading is effective
-        res = chain.invoke(q)
-        ans = res.get("result", "") or ""
-        docs = res.get("source_documents", []) or []
-        got_sources = [getattr(d, "metadata", {}).get("source", "") for d in docs]
-        dtype = exp_dtype or _derive_doc_type_from_source(
-            exp_sources[0] if exp_sources else ""
-        )
-        hit = 1 if (set(exp_sources) & set(got_sources)) else 0
-        score = 0.0
-        if exp_ans_parts:
-            score = sum(
-                1 for p in exp_ans_parts if p and (p.lower() in ans.lower())
-            ) / float(len(exp_ans_parts))
-        return {
-            "tenant": t,
-            "query": q,
-            "hit": hit,
-            "answer_score": score,
-            "got_sources": got_sources,
-            "doc_type": dtype,
-            "ok": True,
-        }
-    except Exception as e:
-        return {"tenant": t, "query": q, "error": str(e), "ok": False}
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    items.append(obj)
+                except Exception as e:
+                    logger.debug("Silent exception (continue): %s", e)
+                    continue
+    except FileNotFoundError:
+        return []
+    return items
+
+
+def _make_filters(tenant: str):
+    # Minimal filters object compatible with deps._milvus_expr_from_filters/_faiss_filter
+    return SimpleNamespace(tenant=tenant)
+
+
+def _derive_doc_type_from_source(src: str) -> str:
+    try:
+        s = (src or "").lower()
+        if s.endswith(".pdf"):
+            return "pdf"
+        if s.endswith(".html") or s.endswith(".htm"):
+            return "html"
+        if s.endswith(".docx"):
+            return "docx"
+        return "other"
+    except Exception:
+        return "other"
+
+
+def _golden_hash(path: str) -> str:
+    try:
+        h = hashlib.sha1(usedforsecurity=False)
+        with open(path, "rb") as f:
+            while True:
+                b = f.read(8192)
+                if not b:
+                    break
+                h.update(b)
+        return h.hexdigest()
+    except Exception:
+        return ""
 
 
 def run_offline_eval(golden_path: str | None = None) -> Dict[str, Any]:
@@ -44,40 +75,59 @@ def run_offline_eval(golden_path: str | None = None) -> Dict[str, Any]:
     hits = 0
     answer_scores = 0.0
     per = []
+    # slicing accumulators
     by_tenant = {}
     by_dtype = {}
-
-    max_workers = min(10, total) if total > 0 else 1
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        results = list(executor.map(_process_item, data))
-
-    for res in results:
-        t = res["tenant"]
-        q = res["query"]
-        if not res.get("ok"):
-            per.append({"tenant": t, "query": q, "error": res.get("error")})
+    for item in data:
+        t = str(item.get("tenant", "")).strip() or "__default__"
+        q = str(item.get("query", ""))
+        exp_sources = list(item.get("expected_sources", []) or [])
+        exp_ans_parts = list(item.get("expected_answer_contains", []) or [])
+        exp_dtype = str(item.get("expected_doc_type", "")).strip()
+        try:
+            chain = build_chain(filters=_make_filters(t))
+            res = chain.invoke(q)
+            ans = res.get("result", "") or ""
+            docs = res.get("source_documents", []) or []
+            got_sources = [getattr(d, "metadata", {}).get("source", "") for d in docs]
+            # attempt a doc_type using the first expected source
+            dtype = exp_dtype or _derive_doc_type_from_source(
+                exp_sources[0] if exp_sources else ""
+            )
+            # retrieval hit
+            hit = 1 if (set(exp_sources) & set(got_sources)) else 0
+            hits += hit
+            # answer contain score
+            score = 0.0
+            if exp_ans_parts:
+                score = sum(
+                    1 for p in exp_ans_parts if p and (p.lower() in ans.lower())
+                ) / float(len(exp_ans_parts))
+            answer_scores += score
+            per.append(
+                {
+                    "tenant": t,
+                    "query": q,
+                    "hit": hit,
+                    "answer_score": score,
+                    "got_sources": got_sources,
+                    "doc_type": dtype,
+                }
+            )
+            # accumulate slices
+            bt = by_tenant.setdefault(t, {"n": 0, "hits": 0, "ans": 0.0})
+            bt["n"] += 1
+            bt["hits"] += hit
+            bt["ans"] += score
+            bd = by_dtype.setdefault(dtype, {"n": 0, "hits": 0, "ans": 0.0})
+            bd["n"] += 1
+            bd["hits"] += hit
+            bd["ans"] += score
+        except Exception as e:
+            per.append({"tenant": t, "query": q, "error": str(e)})
             continue
-
-        hit = res["hit"]
-        score = res["answer_score"]
-        dtype = res["doc_type"]
-        hits += hit
-        answer_scores += score
-        per.append(res)
-
-        # accumulate slices
-        bt = by_tenant.setdefault(t, {"n": 0, "hits": 0, "ans": 0.0})
-        bt["n"] += 1
-        bt["hits"] += hit
-        bt["ans"] += score
-        bd = by_dtype.setdefault(dtype, {"n": 0, "hits": 0, "ans": 0.0})
-        bd["n"] += 1
-        bd["hits"] += hit
-        bd["ans"] += score
-
     recall = hits / float(total) if total else 0.0
     avg_answer = answer_scores / float(total) if total else 0.0
-
     # compute slice metrics
     slices = {"tenant": {}, "doc_type": {}}
     for k, v in by_tenant.items():

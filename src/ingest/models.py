@@ -1,22 +1,35 @@
+from pydantic import BaseModel, Field, field_validator
 import hashlib
-from pydantic import BaseModel, Field, validator
 
 class IngestData(BaseModel):
-    id: str = Field(default_factory=lambda: "")
+    id: str = Field(default="")
     text: str = Field(..., min_length=1)
     source: str = Field(default="")
     page: int = Field(default=-1)
     doc_type: str = Field(default="")
     date: str = Field(default="")
 
-    @validator("id", pre=True, always=True)
-    def set_id(cls, v, values):
+    @field_validator("id", mode="before")
+    @classmethod
+    def set_id(cls, v, info):
         if not v:
-            text = values.get("text", "")
-            return hashlib.sha1(
-                (text or "").encode("utf-8"), usedforsecurity=False
-            ).hexdigest()
+            # In V2 'before' mode, info.data might not be fully populated yet
+            # However, for 'id' it will be called with the raw value.
+            # Actually, id generation based on text Is better handled in model_validator(mode="after")
+            return v
         return v
+    
+    # Actually, let's use a simpler approach for Pydantic V2: 
+    # use model_validator(mode="after") to set the ID if it's missing.
+    from pydantic import model_validator
+    
+    @model_validator(mode="after")
+    def generate_id_if_missing(self) -> "IngestData":
+        if not self.id:
+            self.id = hashlib.sha1(
+                (self.text or "").encode("utf-8"), usedforsecurity=False
+            ).hexdigest()
+        return self
 
 class VectorSchema:
     """Canonical schema for Milvus indexing, aligned with IngestData."""

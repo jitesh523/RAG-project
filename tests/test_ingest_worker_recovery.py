@@ -8,11 +8,11 @@ sys.modules["pymilvus"] = mock_milvus
 sys.modules["langchain_openai"] = MagicMock()
 sys.modules["prometheus_client"] = MagicMock()
 
-import pytest
-import os
-from unittest.mock import patch
-from src.ingest import worker
-from src.config import Config
+import pytest # noqa: E402
+import os # noqa: E402
+from unittest.mock import patch # noqa: E402
+from src.ingest import worker # noqa: E402
+from src.config import Config # noqa: E402
 
 @pytest.fixture
 def mock_env():
