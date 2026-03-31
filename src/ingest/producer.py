@@ -57,8 +57,6 @@ def chunk_docs(docs):
     return splitter.split_documents(docs)
 
 
-
-
 def enqueue(chunks):
     r = redis.Redis.from_url(Config.REDIS_URL, decode_responses=True)
     stream = Config.INGEST_STREAM

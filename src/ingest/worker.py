@@ -47,9 +47,6 @@ def _ensure_group(r: redis.Redis, stream: str, group: str):
         raise
 
 
-
-
-
 def _parse_fields(fields: Dict[str, str]) -> IngestData:
     return IngestData(**fields)
 
@@ -96,11 +93,11 @@ def run_worker():
     tenant = Config.INGEST_TENANT or "__default__"
 
     logger.info("Worker started (PID: %s), tenant: %s", os.getpid(), tenant)
-    
+
     def _process_batch(entries):
         rows_to_insert = []
-        processed_metadata = [] # (msg_id, data, start_time)
-        
+        processed_metadata = []  # (msg_id, data, start_time)
+
         # 1. Parsing, Validation and Embedding
         for msg_id, fields in entries:
             start = time.time()
@@ -109,7 +106,7 @@ def run_worker():
                 if r.sismember(seen_key, data.id):
                     r.xack(stream, group, msg_id)
                     continue
-                
+
                 model_name = _select_embed_model(data.doc_type)
                 if model_name not in embed_clients:
                     embed_clients[model_name] = OpenAIEmbeddings(
@@ -119,13 +116,15 @@ def run_worker():
                 with INGEST_EMBED_DURATION.labels(tenant=tenant).time():
                     emb = embed_clients[model_name].embed_query(data.text)
 
-                rows_to_insert.append((
-                    data.id[:32],
-                    emb,
-                    data.text[:65000],
-                    data.source,
-                    data.page,
-                ))
+                rows_to_insert.append(
+                    (
+                        data.id[:32],
+                        emb,
+                        data.text[:65000],
+                        data.source,
+                        data.page,
+                    )
+                )
                 processed_metadata.append((msg_id, data, start))
 
             except ValidationError as e:
@@ -137,16 +136,23 @@ def run_worker():
 
         # 2. Batch Insertion with Fallback
         if rows_to_insert:
-            part = Config.INGEST_TENANT if Config.MILVUS_PARTITIONED and Config.INGEST_TENANT else None
+            part = (
+                Config.INGEST_TENANT
+                if Config.MILVUS_PARTITIONED and Config.INGEST_TENANT
+                else None
+            )
             try:
                 with INGEST_INSERT_DURATION.labels(tenant=tenant).time():
                     insert_rows(rows_to_insert, partition=part)
-                
+
                 # Success: update Redis metadata and ACK
-                for (msg_id, data, start) in processed_metadata:
+                for msg_id, data, start in processed_metadata:
                     _finalize_success(msg_id, data, start)
             except Exception as e:
-                logger.error("Batch insertion failed, falling back to individual processing: %s", e)
+                logger.error(
+                    "Batch insertion failed, falling back to individual processing: %s",
+                    e,
+                )
                 # Fallback: try each row individually
                 for i, (msg_id, data, start) in enumerate(processed_metadata):
                     try:
@@ -157,7 +163,9 @@ def run_worker():
 
     def _handle_single_failure(msg_id, fields, e):
         attempts = int(fields.get("attempts", "0")) + 1
-        logger.warning("Error processing message %s (attempt %d): %s", msg_id, attempts, e)
+        logger.warning(
+            "Error processing message %s (attempt %d): %s", msg_id, attempts, e
+        )
         if attempts >= Config.INGEST_MAX_RETRIES:
             fields["attempts"] = str(attempts)
             r.xadd(dlq, fields)
@@ -165,7 +173,7 @@ def run_worker():
             INGEST_WORKER_FAILED.labels(tenant=tenant).inc()
         else:
             fields["attempts"] = str(attempts)
-            r.xadd(stream, fields) # Re-queue
+            r.xadd(stream, fields)  # Re-queue
             r.xack(stream, group, msg_id)
             INGEST_WORKER_RETRIES.labels(tenant=tenant, stage="requeue").inc()
 
@@ -179,7 +187,7 @@ def run_worker():
             kmin, kmax = f"filt:{tenant_val}:date_min", f"filt:{tenant_val}:date_max"
             r.set(kmin, d) if not r.get(kmin) or d < r.get(kmin) else None
             r.set(kmax, d) if not r.get(kmax) or d > r.get(kmax) else None
-        
+
         r.sadd(seen_key, data.id)
         r.xack(stream, group, msg_id)
         INGEST_WORKER_PROCESSED.labels(tenant=tenant, doc_type=data.doc_type).inc()
@@ -189,11 +197,16 @@ def run_worker():
         while RUNNING:
             try:
                 # 1. Processing Pending Messages (PEL recovery)
-                pending = r.xreadgroup(group, consumer, streams={stream: "0"}, count=Config.INGEST_CONCURRENCY)
+                pending = r.xreadgroup(
+                    group,
+                    consumer,
+                    streams={stream: "0"},
+                    count=Config.INGEST_CONCURRENCY,
+                )
                 if pending:
                     for _, entries in pending:
                         _process_batch(entries)
-                    continue # Check for more pending before moving to new ones
+                    continue  # Check for more pending before moving to new ones
 
                 # 2. Processing New Messages
                 msgs = r.xreadgroup(
@@ -208,11 +221,15 @@ def run_worker():
 
                 for _, entries in msgs:
                     _process_batch(entries)
-                    
+
                     # 3. Push metrics if Pushgateway is used
                     if Config.PUSHGATEWAY_URL:
                         try:
-                            pushadd_to_gateway(Config.PUSHGATEWAY_URL, job="ingest-worker", registry=REGISTRY)
+                            pushadd_to_gateway(
+                                Config.PUSHGATEWAY_URL,
+                                job="ingest-worker",
+                                registry=REGISTRY,
+                            )
                         except Exception as ex:
                             logger.debug("Failed to push metrics: %s", ex)
 

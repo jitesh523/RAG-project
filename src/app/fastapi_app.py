@@ -2849,6 +2849,7 @@ def _shutdown():
             logger.debug("Failed to close Redis connection: %s", e)
     try:
         from pymilvus import connections
+
         connections.disconnect("default")
         if Config.MILVUS_HOST_SECONDARY:
             connections.disconnect("secondary")

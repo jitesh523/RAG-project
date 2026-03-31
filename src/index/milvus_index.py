@@ -38,7 +38,7 @@ def connect(max_retries: int = 3):
     global _PRIMARY_CONNECTED
     if _PRIMARY_CONNECTED:
         return
-    
+
     attempts = 0
     while attempts < max_retries:
         try:
@@ -49,11 +49,17 @@ def connect(max_retries: int = 3):
             return
         except Exception as e:
             attempts += 1
-            delay = (2 ** attempts) + (random.randint(0, 1000) / 1000.0)
-            logger.warning("Primary Milvus connection failed (attempt %d/%d): %s. Retrying in %.2fs", attempts, max_retries, e, delay)
+            delay = (2**attempts) + (random.randint(0, 1000) / 1000.0)
+            logger.warning(
+                "Primary Milvus connection failed (attempt %d/%d): %s. Retrying in %.2fs",
+                attempts,
+                max_retries,
+                e,
+                delay,
+            )
             if attempts < max_retries:
                 time.sleep(delay)
-    
+
     _PRIMARY_CONNECTED = False
     raise ConnectionError(f"Failed to connect to Milvus after {max_retries} attempts")
 
