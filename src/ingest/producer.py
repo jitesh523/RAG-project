@@ -56,24 +56,28 @@ def chunk_docs(docs):
     return splitter.split_documents(docs)
 
 
+from src.ingest.models import IngestData
+from pydantic import ValidationError
+
 def enqueue(chunks):
     r = redis.Redis.from_url(Config.REDIS_URL, decode_responses=True)
     stream = Config.INGEST_STREAM
     for c in chunks:
         text = c.page_content
         meta = c.metadata or {}
-        h = hashlib.sha1(
-            (text or "").encode("utf-8"), usedforsecurity=False
-        ).hexdigest()
-        fields = {
-            "id": h,
-            "text": text,
-            "source": str(meta.get("source", "")),
-            "page": str(meta.get("page", -1)),
-            "doc_type": str(meta.get("doc_type", "")),
-            "date": str(meta.get("date", "")),
-        }
-        r.xadd(stream, fields)
+        try:
+            # Validate with shared model
+            data = IngestData(
+                text=text,
+                source=str(meta.get("source", "")),
+                page=int(meta.get("page", -1)),
+                doc_type=str(meta.get("doc_type", "")),
+                date=str(meta.get("date", "")),
+            )
+            r.xadd(stream, data.dict())
+        except ValidationError as e:
+            print(f"Validation failed for chunk: {e}")
+            continue
 
 
 if __name__ == "__main__":

@@ -2838,6 +2838,24 @@ def _startup():
         logger.debug("Silent exception (pass): %s", e)
 
 
+@app.on_event("shutdown")
+def _shutdown():
+    logger.info("Main API shutting down...")
+    global _redis
+    if _redis is not None:
+        try:
+            _redis.close()
+        except Exception as e:
+            logger.debug("Failed to close Redis connection: %s", e)
+    try:
+        from pymilvus import connections
+        connections.disconnect("default")
+        if Config.MILVUS_HOST_SECONDARY:
+            connections.disconnect("secondary")
+    except Exception as e:
+        logger.debug("Failed to disconnect from Milvus: %s", e)
+
+
 @app.post(
     "/ask",
     response_model=AskResp,

@@ -8,9 +8,11 @@ from pymilvus import (
 )
 from typing import List, Tuple, Optional
 from src.config import Config
+from src.ingest.models import VectorSchema
 from prometheus_client import Counter
 import time
 import logging
+import random
 
 logger = logging.getLogger(__name__)
 
@@ -34,18 +36,28 @@ _PRIMARY_CONNECTED = False
 _SECONDARY_CONNECTED = False
 
 
-def connect():
+def connect(max_retries: int = 3):
     global _PRIMARY_CONNECTED
     if _PRIMARY_CONNECTED:
         return
-    try:
-        connections.connect(
-            alias="default", host=Config.MILVUS_HOST, port=str(Config.MILVUS_PORT)
-        )
-        _PRIMARY_CONNECTED = True
-    except Exception as e:
-        logger.warning("Primary Milvus connection failed: %s", e)
-        _PRIMARY_CONNECTED = False
+    
+    attempts = 0
+    while attempts < max_retries:
+        try:
+            connections.connect(
+                alias="default", host=Config.MILVUS_HOST, port=str(Config.MILVUS_PORT)
+            )
+            _PRIMARY_CONNECTED = True
+            return
+        except Exception as e:
+            attempts += 1
+            delay = (2 ** attempts) + (random.randint(0, 1000) / 1000.0)
+            logger.warning("Primary Milvus connection failed (attempt %d/%d): %s. Retrying in %.2fs", attempts, max_retries, e, delay)
+            if attempts < max_retries:
+                time.sleep(delay)
+    
+    _PRIMARY_CONNECTED = False
+    raise ConnectionError(f"Failed to connect to Milvus after {max_retries} attempts")
 
 
 def connect_secondary():
@@ -73,23 +85,11 @@ def ensure_collection(name: str = Config.MILVUS_COLLECTION) -> Collection:
     if utility.has_collection(name):
         return Collection(name)
 
-    fields = [
-        FieldSchema(
-            name="id",
-            dtype=DataType.VARCHAR,
-            is_primary=True,
-            auto_id=False,
-            max_length=64,
-        ),
-        FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=EMBED_DIM),
-        FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=65535),
-        FieldSchema(name="source", dtype=DataType.VARCHAR, max_length=1024),
-        FieldSchema(name="page", dtype=DataType.INT64),
-    ]
+    fields = VectorSchema.get_field_definitions(dim=EMBED_DIM)
     schema = CollectionSchema(fields, description="Aerospace chunks")
     col = Collection(name, schema)
     col.create_index(
-        "embedding",
+        VectorSchema.EMBEDDING,
         {"index_type": "IVF_FLAT", "metric_type": "IP", "params": {"nlist": 1024}},
     )
     col.load()
@@ -103,23 +103,11 @@ def ensure_collection_secondary(
         return None
     if utility.has_collection(name, using="secondary"):
         return Collection(name, using="secondary")
-    fields = [
-        FieldSchema(
-            name="id",
-            dtype=DataType.VARCHAR,
-            is_primary=True,
-            auto_id=False,
-            max_length=64,
-        ),
-        FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=EMBED_DIM),
-        FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=65535),
-        FieldSchema(name="source", dtype=DataType.VARCHAR, max_length=1024),
-        FieldSchema(name="page", dtype=DataType.INT64),
-    ]
+    fields = VectorSchema.get_field_definitions(dim=EMBED_DIM)
     schema = CollectionSchema(fields, description="Aerospace chunks (secondary)")
     col = Collection(name, schema, using="secondary")
     col.create_index(
-        "embedding",
+        VectorSchema.EMBEDDING,
         {"index_type": "IVF_FLAT", "metric_type": "IP", "params": {"nlist": 1024}},
     )
     col.load()

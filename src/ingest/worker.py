@@ -1,34 +1,36 @@
 import os
 import time
-import hashlib
-import redis
 import logging
 import signal
-from typing import Dict
-from pydantic import BaseModel, Field, validator
+import redis
+from typing import Dict, List
+from pydantic import ValidationError
 
 from src.config import Config
 from src.index.milvus_index import insert_rows
+from src.ingest.models import IngestData
 from langchain_openai import OpenAIEmbeddings
 from prometheus_client import Counter, Histogram, REGISTRY, pushadd_to_gateway
 
 logger = logging.getLogger(__name__)
 
 INGEST_WORKER_PROCESSED = Counter(
-    "ingest_worker_processed_total", "Total messages processed"
+    "ingest_worker_processed_total", "Total messages processed", ["tenant", "doc_type"]
 )
 INGEST_WORKER_RETRIES = Counter(
-    "ingest_worker_retries_total", "Total processing retries"
+    "ingest_worker_retries_total", "Total processing retries", ["tenant", "stage"]
 )
 INGEST_WORKER_FAILED = Counter(
-    "ingest_worker_failed_total", "Total failed messages sent to DLQ"
+    "ingest_worker_failed_total", "Total failed messages sent to DLQ", ["tenant"]
 )
 INGEST_WORKER_HANDLE = Histogram(
-    "ingest_worker_handle_seconds", "Per-message handling time"
+    "ingest_worker_handle_seconds", "Per-message handling time", ["tenant"]
 )
-INGEST_EMBED_DURATION = Histogram("ingest_embed_seconds", "Time spent embedding text")
+INGEST_EMBED_DURATION = Histogram(
+    "ingest_embed_seconds", "Time spent embedding text", ["tenant"]
+)
 INGEST_INSERT_DURATION = Histogram(
-    "ingest_insert_seconds", "Time spent inserting into vector db"
+    "ingest_insert_seconds", "Time spent inserting into vector db", ["tenant"]
 )
 
 
@@ -45,22 +47,7 @@ def _ensure_group(r: redis.Redis, stream: str, group: str):
         raise
 
 
-class IngestData(BaseModel):
-    id: str = Field(default_factory=lambda: "")
-    text: str = Field(..., min_length=1)
-    source: str = Field(default="")
-    page: int = Field(default=-1)
-    doc_type: str = Field(default="")
-    date: str = Field(default="")
 
-    @validator("id", pre=True, always=True)
-    def set_id(cls, v, values):
-        if not v:
-            text = values.get("text", "")
-            return hashlib.sha1(
-                (text or "").encode("utf-8"), usedforsecurity=False
-            ).hexdigest()
-        return v
 
 
 def _parse_fields(fields: Dict[str, str]) -> IngestData:
@@ -106,127 +93,135 @@ def run_worker():
     embed_clients = {}
     seen_key = "ingest:seen"
     dlq = Config.INGEST_DLQ_STREAM
-    while RUNNING:
-        try:
-            msgs = r.xreadgroup(
-                group,
-                consumer,
-                streams={stream: ">"},
-                count=Config.INGEST_CONCURRENCY,
-                block=2000,  # Smaller block to check RUNNING flag more frequently
-            )
-            if not msgs:
-                continue
+    tenant = Config.INGEST_TENANT or "__default__"
 
-            for sname, entries in msgs:
-                for msg_id, fields in entries:
-                    start = time.time()
+    logger.info("Worker started (PID: %s), tenant: %s", os.getpid(), tenant)
+    
+    def _process_batch(entries):
+        rows_to_insert = []
+        processed_metadata = [] # (msg_id, data, start_time)
+        
+        # 1. Parsing, Validation and Embedding
+        for msg_id, fields in entries:
+            start = time.time()
+            try:
+                data = _parse_fields(fields)
+                if r.sismember(seen_key, data.id):
+                    r.xack(stream, group, msg_id)
+                    continue
+                
+                model_name = _select_embed_model(data.doc_type)
+                if model_name not in embed_clients:
+                    embed_clients[model_name] = OpenAIEmbeddings(
+                        model=model_name, api_key=Config.OPENAI_API_KEY
+                    )
+
+                with INGEST_EMBED_DURATION.labels(tenant=tenant).time():
+                    emb = embed_clients[model_name].embed_query(data.text)
+
+                rows_to_insert.append((
+                    data.id[:32],
+                    emb,
+                    data.text[:65000],
+                    data.source,
+                    data.page,
+                ))
+                processed_metadata.append((msg_id, data, start))
+
+            except ValidationError as e:
+                logger.warning("Validation error on message %s: %s", msg_id, e)
+                INGEST_WORKER_FAILED.labels(tenant=tenant).inc()
+                r.xack(stream, group, msg_id)
+            except Exception as e:
+                _handle_single_failure(msg_id, fields, e)
+
+        # 2. Batch Insertion with Fallback
+        if rows_to_insert:
+            part = Config.INGEST_TENANT if Config.MILVUS_PARTITIONED and Config.INGEST_TENANT else None
+            try:
+                with INGEST_INSERT_DURATION.labels(tenant=tenant).time():
+                    insert_rows(rows_to_insert, partition=part)
+                
+                # Success: update Redis metadata and ACK
+                for (msg_id, data, start) in processed_metadata:
+                    _finalize_success(msg_id, data, start)
+            except Exception as e:
+                logger.error("Batch insertion failed, falling back to individual processing: %s", e)
+                # Fallback: try each row individually
+                for i, (msg_id, data, start) in enumerate(processed_metadata):
                     try:
-                        # Validate and parse with Pydantic
-                        # If validation fails, it raises ValidationError which is caught by the except block
-                        data = _parse_fields(fields)
+                        insert_rows([rows_to_insert[i]], partition=part)
+                        _finalize_success(msg_id, data, start)
+                    except Exception as ex:
+                        _handle_single_failure(msg_id, entries[i][1], ex)
 
-                        # idempotency: skip if already processed
-                        if r.sismember(seen_key, data.id):
-                            r.xack(stream, group, msg_id)
-                            continue
-                        # embed with per-doc_type model
-                        model_name = _select_embed_model(data.doc_type)
-                        if model_name not in embed_clients:
-                            embed_clients[model_name] = OpenAIEmbeddings(
-                                model=model_name, api_key=Config.OPENAI_API_KEY
-                            )
+    def _handle_single_failure(msg_id, fields, e):
+        attempts = int(fields.get("attempts", "0")) + 1
+        logger.warning("Error processing message %s (attempt %d): %s", msg_id, attempts, e)
+        if attempts >= Config.INGEST_MAX_RETRIES:
+            fields["attempts"] = str(attempts)
+            r.xadd(dlq, fields)
+            r.xack(stream, group, msg_id)
+            INGEST_WORKER_FAILED.labels(tenant=tenant).inc()
+        else:
+            fields["attempts"] = str(attempts)
+            r.xadd(stream, fields) # Re-queue
+            r.xack(stream, group, msg_id)
+            INGEST_WORKER_RETRIES.labels(tenant=tenant, stage="requeue").inc()
 
-                        with INGEST_EMBED_DURATION.time():
-                            emb = embed_clients[model_name].embed_query(data.text)
+    def _finalize_success(msg_id, data, start):
+        tenant_val = Config.INGEST_TENANT or "__default__"
+        r.sadd(f"filt:{tenant_val}:sources", str(data.source))
+        if data.doc_type:
+            r.sadd(f"filt:{tenant_val}:doc_types", str(data.doc_type))
+        if data.date:
+            d = str(data.date)[:10]
+            kmin, kmax = f"filt:{tenant_val}:date_min", f"filt:{tenant_val}:date_max"
+            r.set(kmin, d) if not r.get(kmin) or d < r.get(kmin) else None
+            r.set(kmax, d) if not r.get(kmax) or d > r.get(kmax) else None
+        
+        r.sadd(seen_key, data.id)
+        r.xack(stream, group, msg_id)
+        INGEST_WORKER_PROCESSED.labels(tenant=tenant, doc_type=data.doc_type).inc()
+        INGEST_WORKER_HANDLE.labels(tenant=tenant).observe(time.time() - start)
 
-                        part = (
-                            Config.INGEST_TENANT
-                            if Config.MILVUS_PARTITIONED and Config.INGEST_TENANT
-                            else None
-                        )
+    try:
+        while RUNNING:
+            try:
+                # 1. Processing Pending Messages (PEL recovery)
+                pending = r.xreadgroup(group, consumer, streams={stream: "0"}, count=Config.INGEST_CONCURRENCY)
+                if pending:
+                    for _, entries in pending:
+                        _process_batch(entries)
+                    continue # Check for more pending before moving to new ones
 
-                        with INGEST_INSERT_DURATION.time():
-                            insert_rows(
-                                [
-                                    (
-                                        data.id[:32],
-                                        emb,
-                                        data.text[:65000],
-                                        data.source,
-                                        data.page,
-                                    )
-                                ],
-                                partition=part,
-                            )
+                # 2. Processing New Messages
+                msgs = r.xreadgroup(
+                    group,
+                    consumer,
+                    streams={stream: ">"},
+                    count=Config.INGEST_CONCURRENCY,
+                    block=2000,
+                )
+                if not msgs:
+                    continue
 
-                        # update filter metadata per tenant (Redis-first)
+                for _, entries in msgs:
+                    _process_batch(entries)
+                    
+                    # 3. Push metrics if Pushgateway is used
+                    if Config.PUSHGATEWAY_URL:
                         try:
-                            tenant = Config.INGEST_TENANT or "__default__"
-                            r.sadd(f"filt:{tenant}:sources", str(data.source))
-                            if data.doc_type:
-                                r.sadd(
-                                    f"filt:{tenant}:doc_types",
-                                    str(data.doc_type),
-                                )
-                            if data.date:
-                                d = str(data.date)[:10]
-                                kmin = f"filt:{tenant}:date_min"
-                                kmax = f"filt:{tenant}:date_max"
-                                cur_min = r.get(kmin)
-                                cur_max = r.get(kmax)
-                                if not cur_min or d < cur_min:
-                                    r.set(kmin, d)
-                                if not cur_max or d > cur_max:
-                                    r.set(kmax, d)
-                        except Exception as e:
-                            logger.debug(
-                                "Failed to update filter metadata in Redis: %s", e
-                            )
-                        r.sadd(seen_key, data.id)
-                        r.xack(stream, group, msg_id)
-                        INGEST_WORKER_PROCESSED.inc()
-                    except Exception as e:
-                        # retry logic using XCLAIM is more advanced; here we push to DLQ after max retries
-                        logger.warning("Error processing message %s: %s", msg_id, e)
-                        try:
-                            attempts = int(fields.get("attempts", "0")) + 1
-                        except (ValueError, TypeError):
-                            attempts = 1
+                            pushadd_to_gateway(Config.PUSHGATEWAY_URL, job="ingest-worker", registry=REGISTRY)
+                        except Exception as ex:
+                            logger.debug("Failed to push metrics: %s", ex)
 
-                        if attempts >= Config.INGEST_MAX_RETRIES:
-                            try:
-                                fields["attempts"] = str(attempts)
-                                r.xadd(dlq, fields)
-                            except Exception as ex:
-                                logger.debug("Failed to add message to DLQ: %s", ex)
-                            r.xack(stream, group, msg_id)
-                            INGEST_WORKER_FAILED.inc()
-                        else:
-                            fields["attempts"] = str(attempts)
-                            # requeue by adding back to stream
-                            try:
-                                r.xadd(stream, fields)
-                                r.xack(stream, group, msg_id)
-                                INGEST_WORKER_RETRIES.inc()
-                            except Exception as ex:
-                                logger.error("Failed to requeue message: %s", ex)
-                    finally:
-                        INGEST_WORKER_HANDLE.observe(time.time() - start)
-                        if Config.PUSHGATEWAY_URL:
-                            try:
-                                pushadd_to_gateway(
-                                    Config.PUSHGATEWAY_URL,
-                                    job="ingest-worker",
-                                    registry=REGISTRY,
-                                )
-                            except Exception as ex:
-                                logger.debug(
-                                    "Failed to push metrics to Pushgateway: %s", ex
-                                )
-        except Exception as e:
-            logger.error("Worker loop encountered an error: %s", e)
-            time.sleep(1)
+            except Exception as e:
+                logger.error("Worker loop encountered an error: %s", e)
+                time.sleep(1)
+    finally:
+        logger.info("Worker PID %s shutting down...", os.getpid())
+        # Final cleanup if needed
 
 
 if __name__ == "__main__":
