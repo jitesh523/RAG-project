@@ -133,5 +133,8 @@ def test_worker_batch_fallback(
     # Verify xadd for the failed item - order of fields in dict doesn't matter for assert_any_call
     # but we'll use the exact match if possible.
     called_args = [call.args for call in r.xadd.call_args_list]
-    assert any(args[0] == Config.INGEST_STREAM and args[1].get("text") == "bad doc" for args in called_args)
+    assert any(
+        args[0] == Config.INGEST_STREAM and args[1].get("text") == "bad doc"
+        for args in called_args
+    )
     r.xack.assert_any_call(Config.INGEST_STREAM, Config.INGEST_GROUP, "msg2")
