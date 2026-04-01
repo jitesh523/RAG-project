@@ -14,7 +14,7 @@ try:
 except Exception:
     ChatBedrock = None  # type: ignore
     BedrockEmbeddings = None  # type: ignore
-from langchain.chains import RetrievalQA
+from langchain_classic.chains import RetrievalQA
 from src.config import Config
 from prometheus_client import Histogram, Counter
 import redis as _redis_mod

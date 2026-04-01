@@ -1,8 +1,5 @@
 fastapi
 uvicorn
-langchain
-langchain-openai
-langchain-community
 openai
 faiss-cpu>=1.7.4
 pymilvus>=2.4.0
@@ -20,5 +17,3 @@ opentelemetry-sdk
 opentelemetry-exporter-otlp
 sentry-sdk
 rank-bm25
-langchain-aws
-langchain-classic

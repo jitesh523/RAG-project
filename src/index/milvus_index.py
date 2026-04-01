@@ -49,7 +49,7 @@ def connect(max_retries: int = 3):
             return
         except Exception as e:
             attempts += 1
-            delay = (2**attempts) + (random.randint(0, 1000) / 1000.0)
+            delay = (2**attempts) + (random.randint(0, 1000) / 1000.0)  # nosec B311
             logger.warning(
                 "Primary Milvus connection failed (attempt %d/%d): %s. Retrying in %.2fs",
                 attempts,
