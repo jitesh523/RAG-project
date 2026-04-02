@@ -2,7 +2,6 @@ import logging
 import json
 import time
 import sys
-import os
 from types import SimpleNamespace
 from typing import Dict, Any, List
 from prometheus_client import Gauge, Counter, pushadd_to_gateway, REGISTRY
@@ -126,7 +125,9 @@ def run_offline_eval(golden_path: str | None = None) -> Dict[str, Any]:
             # answer contain score
             score = 0.0
             if exp_ans_parts:
-                count = sum(1 for p in exp_ans_parts if p and (p.lower() in ans.lower()))
+                count = sum(
+                    1 for p in exp_ans_parts if p and (p.lower() in ans.lower())
+                )
                 score = count / float(len(exp_ans_parts))
             answer_scores += score
             per.append(
@@ -192,7 +193,9 @@ def run_offline_eval(golden_path: str | None = None) -> Dict[str, Any]:
             OFFLINE_EVAL_ANSWER.set(avg_answer)
             OFFLINE_EVAL_RUNS.inc()
             for k, v in slices.get("tenant", {}).items():
-                OFFLINE_EVAL_SLICE_RECALL.labels("tenant", k, ghash).set(v["recall_at_k"])
+                OFFLINE_EVAL_SLICE_RECALL.labels("tenant", k, ghash).set(
+                    v["recall_at_k"]
+                )
                 OFFLINE_EVAL_SLICE_ANS.labels("tenant", k, ghash).set(
                     v["avg_answer_contains"]
                 )
