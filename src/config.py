@@ -153,7 +153,7 @@ class Config:
     EXPORT_ENABLED = os.getenv("EXPORT_ENABLED", "true").lower() == "true"
     EXPORT_FORMAT = os.getenv("EXPORT_FORMAT", "markdown").lower()
     # Phase 8: Offline eval & canary
-    EVAL_GOLDEN_PATH = os.getenv("EVAL_GOLDEN_PATH", "./eval/golden.jsonl")
+    EVAL_GOLDEN_PATH = os.getenv("EVAL_GOLDEN_PATH", "./tests/eval/golden.jsonl")
     EVAL_PUSHGATEWAY_JOB = os.getenv("EVAL_PUSHGATEWAY_JOB", "offline-eval")
     CANARY_RERANK_WINDOW = int(os.getenv("CANARY_RERANK_WINDOW", "200"))
     CANARY_RERANK_MIN_HELPFUL = float(os.getenv("CANARY_RERANK_MIN_HELPFUL", "0.55"))

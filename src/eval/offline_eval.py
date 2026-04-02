@@ -1,6 +1,8 @@
 import logging
 import json
 import time
+import sys
+import os
 from types import SimpleNamespace
 from typing import Dict, Any, List
 from prometheus_client import Gauge, Counter, pushadd_to_gateway, REGISTRY
@@ -10,8 +12,31 @@ from src.app.deps import build_chain
 
 logger = logging.getLogger(__name__)
 
-# Offline evaluation over a golden set
-# Golden JSONL schema per line: {"tenant": "t1", "query": "...", "expected_sources": ["foo.pdf"], "expected_answer_contains": ["term1", "term2"]}
+# Module-level metrics registration to ensure idempotency
+# Prefixing with rag_ to match project standards
+OFFLINE_EVAL_RECALL = Gauge(
+    "rag_offline_eval_recall", "Offline eval recall@k", registry=REGISTRY
+)
+OFFLINE_EVAL_ANSWER = Gauge(
+    "rag_offline_eval_answer_contains",
+    "Offline eval answer contains score",
+    registry=REGISTRY,
+)
+OFFLINE_EVAL_RUNS = Counter(
+    "rag_offline_eval_runs_total", "Offline eval runs", registry=REGISTRY
+)
+OFFLINE_EVAL_SLICE_RECALL = Gauge(
+    "rag_offline_eval_slice_recall",
+    "Recall@k per slice",
+    ["slice_type", "slice_key", "golden_hash"],
+    registry=REGISTRY,
+)
+OFFLINE_EVAL_SLICE_ANS = Gauge(
+    "rag_offline_eval_slice_answer_contains",
+    "Answer-contains per slice",
+    ["slice_type", "slice_key", "golden_hash"],
+    registry=REGISTRY,
+)
 
 
 def _load_golden(path: str) -> List[Dict[str, Any]]:
@@ -67,6 +92,7 @@ def _golden_hash(path: str) -> str:
 
 
 def run_offline_eval(golden_path: str | None = None) -> Dict[str, Any]:
+    # Ensure Config is loaded before using path defaults
     path = golden_path or Config.EVAL_GOLDEN_PATH
     data = _load_golden(path)
     if not data:
@@ -100,9 +126,8 @@ def run_offline_eval(golden_path: str | None = None) -> Dict[str, Any]:
             # answer contain score
             score = 0.0
             if exp_ans_parts:
-                score = sum(
-                    1 for p in exp_ans_parts if p and (p.lower() in ans.lower())
-                ) / float(len(exp_ans_parts))
+                count = sum(1 for p in exp_ans_parts if p and (p.lower() in ans.lower()))
+                score = count / float(len(exp_ans_parts))
             answer_scores += score
             per.append(
                 {
@@ -124,8 +149,10 @@ def run_offline_eval(golden_path: str | None = None) -> Dict[str, Any]:
             bd["hits"] += hit
             bd["ans"] += score
         except Exception as e:
+            logger.error("Error in evaluation row: %s", e)
             per.append({"tenant": t, "query": q, "error": str(e)})
             continue
+
     recall = hits / float(total) if total else 0.0
     avg_answer = answer_scores / float(total) if total else 0.0
     # compute slice metrics
@@ -144,6 +171,7 @@ def run_offline_eval(golden_path: str | None = None) -> Dict[str, Any]:
             "avg_answer_contains": v["ans"] / float(n),
             "n": v["n"],
         }
+
     ghash = _golden_hash(path)
     out = {
         "ok": True,
@@ -156,52 +184,39 @@ def run_offline_eval(golden_path: str | None = None) -> Dict[str, Any]:
         "slices": slices,
         "details": per[:50],  # cap preview
     }
+
     # Optionally push summary to Pushgateway
     if Config.PUSHGATEWAY_URL:
         try:
-            g_recall = Gauge(
-                "offline_eval_recall", "Offline eval recall@k", registry=REGISTRY
-            )
-            g_ans = Gauge(
-                "offline_eval_answer_contains",
-                "Offline eval answer contains score",
-                registry=REGISTRY,
-            )
-            c_runs = Counter(
-                "offline_eval_runs_total", "Offline eval runs", registry=REGISTRY
-            )
-            g_recall.set(recall)
-            g_ans.set(avg_answer)
-            c_runs.inc()
-            # slice metrics with labels
-            g_slice_recall = Gauge(
-                "offline_eval_slice_recall",
-                "Recall@k per slice",
-                ["slice_type", "slice_key", "golden_hash"],
-                registry=REGISTRY,
-            )
-            g_slice_ans = Gauge(
-                "offline_eval_slice_answer_contains",
-                "Answer-contains per slice",
-                ["slice_type", "slice_key", "golden_hash"],
-                registry=REGISTRY,
-            )
+            OFFLINE_EVAL_RECALL.set(recall)
+            OFFLINE_EVAL_ANSWER.set(avg_answer)
+            OFFLINE_EVAL_RUNS.inc()
             for k, v in slices.get("tenant", {}).items():
-                g_slice_recall.labels("tenant", k, ghash).set(v["recall_at_k"])
-                g_slice_ans.labels("tenant", k, ghash).set(v["avg_answer_contains"])
+                OFFLINE_EVAL_SLICE_RECALL.labels("tenant", k, ghash).set(v["recall_at_k"])
+                OFFLINE_EVAL_SLICE_ANS.labels("tenant", k, ghash).set(
+                    v["avg_answer_contains"]
+                )
             for k, v in slices.get("doc_type", {}).items():
-                g_slice_recall.labels("doc_type", k, ghash).set(v["recall_at_k"])
-                g_slice_ans.labels("doc_type", k, ghash).set(v["avg_answer_contains"])
+                OFFLINE_EVAL_SLICE_RECALL.labels("doc_type", k, ghash).set(
+                    v["recall_at_k"]
+                )
+                OFFLINE_EVAL_SLICE_ANS.labels("doc_type", k, ghash).set(
+                    v["avg_answer_contains"]
+                )
             pushadd_to_gateway(
                 Config.PUSHGATEWAY_URL,
                 job=Config.EVAL_PUSHGATEWAY_JOB,
                 registry=REGISTRY,
             )
         except Exception as e:
-            logger.debug("Silent exception (pass): %s", e)
+            logger.debug("Failed to push to Pushgateway: %s", e)
     return out
 
 
 if __name__ == "__main__":
+    # Support direct execution if not run as a module
+    if "." not in sys.path:
+        sys.path.append(".")
+    logging.basicConfig(level=logging.INFO)
     res = run_offline_eval()
     print(json.dumps(res, indent=2))
