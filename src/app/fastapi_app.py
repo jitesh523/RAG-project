@@ -28,8 +28,10 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 import sentry_sdk
 from sentry_sdk.integrations.asgi import SentryAsgiMiddleware
+
 try:
     from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
     _FASTAPI_INSTRUMENTOR_AVAILABLE = True
 except Exception:
     _FASTAPI_INSTRUMENTOR_AVAILABLE = False
