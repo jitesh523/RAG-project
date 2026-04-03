@@ -12,6 +12,31 @@ from src.index.milvus_index import insert_rows
 from src.config import Config
 from prometheus_client import Counter, Histogram, pushadd_to_gateway, REGISTRY
 
+from opentelemetry import trace as ot_trace
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+import sentry_sdk
+
+_tracer = ot_trace.get_tracer("rag.ingest")
+if Config.OTEL_ENABLED and Config.OTEL_EXPORTER_OTLP_ENDPOINT:
+    try:
+        resource = Resource.create({"service.name": Config.OTEL_SERVICE_NAME or "rag-ingest"})
+        provider = TracerProvider(resource=resource)
+        exporter = OTLPSpanExporter(endpoint=Config.OTEL_EXPORTER_OTLP_ENDPOINT)
+        provider.add_span_processor(BatchSpanProcessor(exporter))
+        ot_trace.set_tracer_provider(provider)
+        _tracer = ot_trace.get_tracer("rag.ingest")
+    except Exception:
+        pass
+
+if Config.SENTRY_DSN:
+    try:
+        sentry_sdk.init(dsn=Config.SENTRY_DSN, traces_sample_rate=0.0)
+    except Exception:
+        pass
+
 logger = logging.getLogger(__name__)
 
 EMBED_BATCHES_TOTAL = Counter(
@@ -67,24 +92,26 @@ def to_milvus_rows(chunks, embeddings):
         attempt = 0
         delay = max(0.001, Config.RETRY_BASE_DELAY_MS / 1000.0)
         start = time.time()
-        while True:
-            try:
-                part = embeddings.embed_documents(t_batch)
-                break
-            except Exception as e:
-                attempt += 1
-                if attempt >= max(1, Config.RETRY_MAX_ATTEMPTS):
-                    logger.error("Embedding failed after max retries: %s", e)
-                    raise
-                INGEST_RETRIES.labels("embed").inc()
-                logger.debug(
-                    "Embedding attempt %d failed: %s. Retrying in %.3fs...",
-                    attempt,
-                    e,
-                    delay,
-                )
-                time.sleep(delay)
-                delay *= 2
+        with _tracer.start_as_current_span("embed_documents") as span:
+            span.set_attribute("batch_size", len(t_batch))
+            while True:
+                try:
+                    part = embeddings.embed_documents(t_batch)
+                    break
+                except Exception as e:
+                    attempt += 1
+                    if attempt >= max(1, Config.RETRY_MAX_ATTEMPTS):
+                        logger.error("Embedding failed after max retries: %s", e)
+                        raise
+                    INGEST_RETRIES.labels("embed").inc()
+                    logger.debug(
+                        "Embedding attempt %d failed: %s. Retrying in %.3fs...",
+                        attempt,
+                        e,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    delay *= 2
         EMBED_BATCH_DURATION.observe(time.time() - start)
         EMBED_BATCHES_TOTAL.inc()
         EMBED_ITEMS_TOTAL.inc(len(t_batch))
@@ -131,29 +158,31 @@ def main(input_dir: str, batch_size: int):
         rows = to_milvus_rows(batch, embeddings)
         ins_attempt = 0
         ins_delay = max(0.001, Config.RETRY_BASE_DELAY_MS / 1000.0)
-        while True:
-            try:
-                part = (
-                    Config.INGEST_TENANT
-                    if Config.MILVUS_PARTITIONED and Config.INGEST_TENANT
-                    else None
-                )
-                insert_rows(rows, partition=part)
-                break
-            except Exception as e:
-                ins_attempt += 1
-                if ins_attempt >= max(1, Config.RETRY_MAX_ATTEMPTS):
-                    logger.error("Milvus insertion failed after max retries: %s", e)
-                    raise
-                INGEST_RETRIES.labels("insert").inc()
-                logger.debug(
-                    "Milvus insertion attempt %d failed: %s. Retrying in %.3fs...",
-                    ins_attempt,
-                    e,
-                    ins_delay,
-                )
-                time.sleep(ins_delay)
-                ins_delay *= 2
+        with _tracer.start_as_current_span("insert_rows") as span:
+            span.set_attribute("batch_size", len(rows))
+            while True:
+                try:
+                    part = (
+                        Config.INGEST_TENANT
+                        if Config.MILVUS_PARTITIONED and Config.INGEST_TENANT
+                        else None
+                    )
+                    insert_rows(rows, partition=part)
+                    break
+                except Exception as e:
+                    ins_attempt += 1
+                    if ins_attempt >= max(1, Config.RETRY_MAX_ATTEMPTS):
+                        logger.error("Milvus insertion failed after max retries: %s", e)
+                        raise
+                    INGEST_RETRIES.labels("insert").inc()
+                    logger.debug(
+                        "Milvus insertion attempt %d failed: %s. Retrying in %.3fs...",
+                        ins_attempt,
+                        e,
+                        ins_delay,
+                    )
+                    time.sleep(ins_delay)
+                    ins_delay *= 2
         # metrics: increment counter and optionally push to Pushgateway
         INGEST_DOCS_TOTAL.inc(len(batch))
         if Config.PUSHGATEWAY_URL:

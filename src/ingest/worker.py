@@ -12,6 +12,31 @@ from src.ingest.models import IngestData
 from langchain_openai import OpenAIEmbeddings
 from prometheus_client import Counter, Histogram, REGISTRY, pushadd_to_gateway
 
+from opentelemetry import trace as ot_trace
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+import sentry_sdk
+
+_tracer = ot_trace.get_tracer("rag.worker")
+if Config.OTEL_ENABLED and Config.OTEL_EXPORTER_OTLP_ENDPOINT:
+    try:
+        resource = Resource.create({"service.name": Config.OTEL_SERVICE_NAME or "rag-worker"})
+        provider = TracerProvider(resource=resource)
+        exporter = OTLPSpanExporter(endpoint=Config.OTEL_EXPORTER_OTLP_ENDPOINT)
+        provider.add_span_processor(BatchSpanProcessor(exporter))
+        ot_trace.set_tracer_provider(provider)
+        _tracer = ot_trace.get_tracer("rag.worker")
+    except Exception:
+        pass
+
+if Config.SENTRY_DSN:
+    try:
+        sentry_sdk.init(dsn=Config.SENTRY_DSN, traces_sample_rate=0.0)
+    except Exception:
+        pass
+
 logger = logging.getLogger(__name__)
 
 INGEST_WORKER_PROCESSED = Counter(
@@ -113,8 +138,10 @@ def run_worker():
                         model=model_name, api_key=Config.OPENAI_API_KEY
                     )
 
-                with INGEST_EMBED_DURATION.labels(tenant=tenant).time():
-                    emb = embed_clients[model_name].embed_query(data.text)
+                with _tracer.start_as_current_span("embed_query") as span:
+                    span.set_attribute("tenant", tenant)
+                    with INGEST_EMBED_DURATION.labels(tenant=tenant).time():
+                        emb = embed_clients[model_name].embed_query(data.text)
 
                 rows_to_insert.append(
                     (
@@ -142,8 +169,11 @@ def run_worker():
                 else None
             )
             try:
-                with INGEST_INSERT_DURATION.labels(tenant=tenant).time():
-                    insert_rows(rows_to_insert, partition=part)
+                with _tracer.start_as_current_span("insert_rows") as span:
+                    span.set_attribute("tenant", tenant)
+                    span.set_attribute("batch_size", len(rows_to_insert))
+                    with INGEST_INSERT_DURATION.labels(tenant=tenant).time():
+                        insert_rows(rows_to_insert, partition=part)
 
                 # Success: update Redis metadata and ACK
                 for msg_id, data, start in processed_metadata:

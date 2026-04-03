@@ -22,3 +22,4 @@ sentry-sdk
 rank-bm25
 langchain-aws
 langchain-classic
+opentelemetry-instrumentation-fastapi
