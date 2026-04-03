@@ -19,25 +19,28 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 import sentry_sdk
 
+logger = logging.getLogger(__name__)
+
 _tracer = ot_trace.get_tracer("rag.worker")
 if Config.OTEL_ENABLED and Config.OTEL_EXPORTER_OTLP_ENDPOINT:
     try:
-        resource = Resource.create({"service.name": Config.OTEL_SERVICE_NAME or "rag-worker"})
+        resource = Resource.create(
+            {"service.name": Config.OTEL_SERVICE_NAME or "rag-worker"}
+        )
         provider = TracerProvider(resource=resource)
         exporter = OTLPSpanExporter(endpoint=Config.OTEL_EXPORTER_OTLP_ENDPOINT)
         provider.add_span_processor(BatchSpanProcessor(exporter))
         ot_trace.set_tracer_provider(provider)
         _tracer = ot_trace.get_tracer("rag.worker")
-    except Exception:
-        pass
+    except Exception as e:  # nosec B110
+        logger.debug("OTel tracer init failed: %s", e)
 
 if Config.SENTRY_DSN:
     try:
         sentry_sdk.init(dsn=Config.SENTRY_DSN, traces_sample_rate=0.0)
-    except Exception:
-        pass
+    except Exception as e:  # nosec B110
+        logger.debug("Sentry init failed: %s", e)
 
-logger = logging.getLogger(__name__)
 
 INGEST_WORKER_PROCESSED = Counter(
     "ingest_worker_processed_total", "Total messages processed", ["tenant", "doc_type"]
