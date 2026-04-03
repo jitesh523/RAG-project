@@ -28,7 +28,11 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 import sentry_sdk
 from sentry_sdk.integrations.asgi import SentryAsgiMiddleware
-from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+try:
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+    _FASTAPI_INSTRUMENTOR_AVAILABLE = True
+except Exception:
+    _FASTAPI_INSTRUMENTOR_AVAILABLE = False
 
 from src.app.deps import build_chain
 from src.config import Config
@@ -2315,7 +2319,8 @@ if Config.OTEL_ENABLED and Config.OTEL_EXPORTER_OTLP_ENDPOINT:
         provider.add_span_processor(BatchSpanProcessor(exporter))
         ot_trace.set_tracer_provider(provider)
         _tracer = ot_trace.get_tracer(__name__)
-        FastAPIInstrumentor.instrument_app(app)
+        if _FASTAPI_INSTRUMENTOR_AVAILABLE:
+            FastAPIInstrumentor.instrument_app(app)
     except Exception:
         _tracer = None
 
