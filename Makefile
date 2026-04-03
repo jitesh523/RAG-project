@@ -8,8 +8,14 @@ install:
 run:
 	uvicorn src.app.fastapi_app:app --host 0.0.0.0 --port $${PORT:-8000}
 
-format:
-	@echo "Add your formatter here (ruff/black) if you like"
+fmt:
+	black .
+	ruff check . --fix
+
+lint:
+	ruff check .
+	black --check .
+	bandit -r src -q
 
 test:
 	pytest -q
