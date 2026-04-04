@@ -21,6 +21,7 @@ import redis as _redis_mod
 import time
 from typing import List, Dict, Any
 from src.retrieval.hybrid_v2 import BM25Adapter, blend_candidates
+from src.retrieval.reranker import rerank_documents
 
 logger = logging.getLogger(__name__)
 
@@ -495,6 +496,36 @@ def build_chain(
     else:
         base_retriever = vs.as_retriever(search_type="mmr", search_kwargs=search_kwargs)
         retriever = TimedRetriever(base_retriever, backend_label=backend)
+
+    # --- ML Reranker layer (wraps any retriever when enabled) ---
+    do_rerank = rerank_enabled if rerank_enabled is not None else Config.RERANK_ENABLED
+    if do_rerank:
+        rerank_model = Config.RERANK_MODEL or "BAAI/bge-reranker-base"
+        rerank_top_k = k_eff
+
+        class RerankerRetriever:
+            """Wraps an existing retriever and applies ML reranking post-retrieval."""
+
+            def __init__(self, inner, model: str, top_k: int):
+                self._inner = inner
+                self._model = model
+                self._top_k = top_k
+
+            def get_relevant_documents(self, query: str):
+                docs = self._inner.get_relevant_documents(query)
+                if not docs:
+                    return docs
+                try:
+                    scored = rerank_documents(
+                        query, docs, model_name=self._model, top_k=self._top_k
+                    )
+                    return [d for (_, d) in scored]
+                except Exception as e:
+                    logger.warning("Reranker failed, returning original order: %s", e)
+                    return docs
+
+        retriever = RerankerRetriever(retriever, rerank_model, rerank_top_k)
+
     qa = RetrievalQA.from_chain_type(
         llm=llm, retriever=retriever, return_source_documents=True
     )

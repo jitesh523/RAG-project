@@ -24,3 +24,4 @@ langchain-aws
 langchain-classic
 opentelemetry-instrumentation-fastapi
 setuptools
+sentence-transformers
